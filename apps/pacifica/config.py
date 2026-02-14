@@ -31,6 +31,8 @@ class Config(BaseModel):
     pnl_limit: float = Field(0.25, gt=0, lt=1)
     use_limit: bool = Field(False)
     limit_wait: DurationSec = DurationSec("60s")
+    limit_market_fallback: bool = Field(True)
+    first_as_main: bool = Field(False)
 
     @classmethod
     def load(cls, filepath: str):

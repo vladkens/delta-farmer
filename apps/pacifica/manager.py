@@ -5,6 +5,7 @@ import random
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import partial
 
 from core import logger, utils
 
@@ -46,7 +47,7 @@ class Manager:
         rs1 = await asyncio.gather(*(acc.cancel_all_orders() for acc in accs))
         rs2 = await asyncio.gather(*(acc.cancel_all_positions() for acc in accs))
         if (sum(rs1) + sum(rs2) > 0) and log_close:
-            logger.debug(f"Closed {sum(rs1)} orders and {sum(rs2)} positions")
+            logger.info(f"Closed {sum(rs1)} orders and {sum(rs2)} positions")
 
     async def _trade_check(self, accs: list[Client], market: str) -> bool:
         # logger.debug(f"Checking position safety for {market}...")
@@ -92,7 +93,7 @@ class Manager:
         return True
 
     async def trade(self, accs: list[Client]):
-        accs = utils.shuffle(accs)
+        accs = accs[:1] + utils.shuffle(accs[1:]) if self.cfg.first_as_main else utils.shuffle(accs)
         accs_map = {acc.name: acc for acc in accs}
         assert len(accs) >= 2, "At least two accounts are required."
         # logger.debug(f"accs: {', '.join(acc.name for acc in accs)}")
@@ -123,12 +124,19 @@ class Manager:
 
         await self.ensure_leverage(accs, market)
 
+        limit_order = partial(
+            acts[0].acc.limit_order_and_wait,
+            symbol=market,
+            timeout=self.cfg.limit_wait,
+            use_market_fallback=self.cfg.limit_market_fallback,
+        )
+
         if not self.cfg.use_limit:
             tasks = [act.acc.market_order(market, act.side, qsize=act.size) for act in acts]
             await asyncio.gather(*tasks)
         else:
-            order_id = await acts[0].acc.limit_order(market, acts[0].side, qsize=acts[0].size)
-            if not await acts[0].acc.wait_order_filled(order_id, self.cfg.limit_wait):
+            filled = await limit_order(side=acts[0].side, qsize=acts[0].size)
+            if not filled:
                 await self.close(accs, log_close=False)
                 return
 
@@ -140,14 +148,11 @@ class Manager:
         # close first account with limit if no error during wait and limit orders enabled
         if self.cfg.use_limit and success:
             close_side = "bid" if acts[0].side == "ask" else "ask"
-            order_id = await acts[0].acc.limit_order(
-                market, close_side, qsize=acts[0].size, reduce_only=True
-            )
-            await acts[0].acc.wait_order_filled(order_id, self.cfg.limit_wait)
+            await limit_order(side=close_side, qsize=acts[0].size, reduce_only=True)
 
         # close all other orders as market
-        await asyncio.gather(*(acc.cancel_all_positions() for acc in accs))
         # await self.close(accs, log_close=False)
+        await asyncio.gather(*(acc.cancel_all_positions() for acc in accs))
 
         now = await self.get_bals(accs)
         diff_sum = sum(x[1] for x in now) - sum(x[1] for x in was)

@@ -15,7 +15,7 @@ clean:
 
 HOST=lab
 EXEC=ssh -tt $(HOST)
-SYNC=rsync -avz --delete-after --exclude={'.git','.venv','*.pyc','.DS_Store'}
+SYNC=rsync -avz --delete-after --exclude={'.git','.venv','.ruff_cache','.DS_Store','*.pyc','.env'}
 DDIR=~/delta-farmer
 UV=~/.local/bin/uv
 

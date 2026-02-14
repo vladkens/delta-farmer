@@ -9,7 +9,9 @@ trade_heartbeat = "15s"  # Position monitoring interval
 
 pnl_limit = 0.25  # Close if P&L exceeds ±25% of position size
 use_limit = false  # Use limit orders instead of market (lower fees but may not fill)
-limit_wait = "60s"  # Time to wait for limit order fill
+limit_wait = "60s"  # Max time to wait for limit order since first partial fill
+limit_market_fallback = true  # Use market order if limit fails (false = cancel & retry next cycle)
+first_as_main = true  # Always use first account as main (false = random selection)
 
 
 # Accounts (recommended: $100+ balance per account for delta-neutral pairs)

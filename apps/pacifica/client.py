@@ -4,10 +4,11 @@ import asyncio
 import json
 import time
 from decimal import Decimal
-from typing import Literal
+from functools import partial
+from typing import Literal, cast
 
 import base58
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from solders.keypair import Keypair
 
 from core import logger, utils
@@ -61,6 +62,9 @@ class Position(BaseModel):
     # updated_at: int
 
 
+OrderStatus = Literal["open", "filled", "partially_filled", "cancelled", "rejected"]
+
+
 # https://docs.pacifica.fi/api-documentation/api/rest-api/orders/get-open-orders#response
 class Order(BaseModel):
     order_id: int
@@ -77,7 +81,8 @@ class Order(BaseModel):
     trigger_price_type: str | None
     reduce_only: bool
     created_at: int
-    updated_at: int
+    updated_at: int = Field(validation_alias=AliasChoices("updated_at", "created_at"))
+    status: OrderStatus = Field("open", alias="order_status")
 
 
 class Trade(BaseModel):
@@ -341,28 +346,83 @@ class Client:
         }
         msg = prepare_msg(self.keypair, "create_order", dat)
         res = await self.call("POST", "/orders/create", json=msg)
-        return res["data"]["order_id"]
+        return cast(int, res["data"]["order_id"])
+
+    async def cancel_order(self, order_id: int, symbol: str):
+        dat = {"order_id": order_id, "symbol": symbol}
+        msg = prepare_msg(self.keypair, "cancel_order", dat)
+        await self.call("POST", "/orders/cancel", json=msg)
+
+    async def get_order(self, order_id: int):
+        res = await self.call("GET", f"/orders/history_by_id?order_id={order_id}")
+        return Order(**res["data"][0])  # return latest status of the order
 
     # https://docs.pacifica.fi/api-documentation/api/rest-api/orders/get-order-history-by-id#response
-    async def wait_order_filled(self, order_id: int, timeout=30):
-        since_ts = time.time()
+    async def limit_order_and_wait(
+        self,
+        symbol: str,
+        side: OrderSide,
+        *,
+        asize: Number | None = None,
+        qsize: Number | None = None,
+        price: Number | None = None,
+        reduce_only=False,
+        timeout=60,
+        reprice_interval=20,
+        use_market_fallback=True,
+    ):
+        """Place limit order and wait for fill with adaptive repricing. Falls back to market on timeout."""
+
+        l_order = partial(self.limit_order, symbol, side, reduce_only=reduce_only)
+        m_order = partial(self.market_order, symbol, side, reduce_only=reduce_only)
+
+        order_id = await l_order(asize=asize, qsize=qsize, price=price)
+
+        started_at, reprice_at = time.time(), time.time()
+        filled_since, last_price = None, None
+
         while True:
-            await asyncio.sleep(2)
-            res = await self.call("GET", f"/orders/history_by_id?order_id={order_id}")
-            res = res["data"][0]  # hist list of order status changes, pick most recent
+            await asyncio.sleep(3)
+            rs = await self.get_order(order_id)
 
-            status = res["order_status"]
-            inited, filled = Decimal(res["initial_amount"]), Decimal(res["filled_amount"])
-            lbl = f"Limit order ({filled} / {inited})"
-
-            if status == "filled":
-                logger.info(f"{lbl} filled in {time.time() - since_ts:.1f}s")
+            if rs.status == "filled":
+                logger.info(f"Limit order filled in {time.time() - started_at:.1f}s")
                 return True
 
-            if status in ("cancelled", "rejected"):
-                logger.warning(f"{lbl} got {status}, stopping...")
+            if rs.status in ("cancelled", "rejected"):
+                logger.info(f"Limit order {rs.status}")
                 return False
 
-            if time.time() - since_ts > timeout:
-                logger.warning(f"{lbl} not filled after {timeout}s, cancelling...")
+            # Count order timeout from first partial fill
+            if rs.filled_amount > 0 and filled_since is None:
+                filled_since = time.time()
+
+            if filled_since and (time.time() - filled_since) > timeout:
+                logger.debug(f"Partial fill timeout after {timeout}s")
+                await self.cancel_order(order_id, rs.symbol)
+
+                if use_market_fallback:
+                    remaining = rs.initial_amount - rs.filled_amount
+                    logger.debug(f"Market fallback for {remaining}")
+                    await m_order(asize=remaining, qsize=None)
+                    return True
+
                 return False
+
+            # Reprice to BBO if interval elapsed
+            if (time.time() - reprice_at) >= reprice_interval:
+                last_price = last_price or rs.price
+                bids, asks = await self.order_book(rs.symbol)
+                new_price = bids[0].price if rs.side == "bid" else asks[0].price
+
+                if new_price == last_price:
+                    # logger.debug(f"Price unchanged at {new_price}")
+                    reprice_at = time.time()
+                    continue
+
+                remaining = rs.initial_amount - rs.filled_amount
+                await self.cancel_order(order_id, rs.symbol)
+                logger.debug(f"Reprice: {last_price} → {new_price}")
+
+                order_id = await l_order(asize=remaining, qsize=None, price=new_price)
+                reprice_at, last_price = time.time(), new_price

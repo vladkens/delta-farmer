@@ -1,11 +1,13 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Sleep is overrated anyway
+import os
 import sys
 
 from loguru import logger
 
 __all__ = ["logger"]
 
+logger.level("TRACE", icon=".")
 logger.level("DEBUG", icon="·")
 logger.level("INFO", icon="i")
 logger.level("WARNING", icon="!")
@@ -33,5 +35,6 @@ def formatter(record):
 
 
 # https://github.com/Delgan/loguru/blob/0.7.3/loguru/_defaults.py#L32-L38
+level = (os.environ.get("LOGURU_LEVEL") or "DEBUG").upper()
 logger.remove()
-logger.add(sys.stderr, format=formatter)
+logger.add(sys.stderr, format=formatter, level=level)
