@@ -1,0 +1,30 @@
+# Trading parameters
+markets = ["BTC", "ETH", "SOL"]  # Perpetual contracts to trade (see https://pacifica.fi)
+leverage = 10  # Leverage multiplier (1-50)
+
+trade_size_usd = { min = 140, max = 160 }  # Total size in USD (split 50/50 between LONG and SHORT positions)
+trade_duration = { min = "15m", max = "20m" }  # How long to hold positions (formats: "30s", "15m", "2h")
+trade_cooldown = { min = "3m", max = "6m" }  # Wait time between trades
+trade_heartbeat = "15s"  # Position monitoring interval
+
+pnl_limit = 0.25  # Close if P&L exceeds ±25% of position size
+use_limit = false  # Use limit orders instead of market (lower fees but may not fill)
+limit_wait = "60s"  # Time to wait for limit order fill
+
+
+# Accounts (recommended: $100+ balance per account for delta-neutral pairs)
+
+[[accounts]]
+name = "Account 1"
+privkey = "your-base58-private-key-here"  # Solana private key - run `config encrypt` after setup!
+# proxy = "http://user:pass@proxy:port"  # Optional proxy
+# enabled = true  # Optional: enable/disable account (default: true)
+
+[[accounts]]
+name = "Account 2"
+privkey = "your-base58-private-key-here"
+
+# [[accounts]]
+# name = "Account 3"
+# privkey = "your-base58-private-key-here"
+# enabled = false

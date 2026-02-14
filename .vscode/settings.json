@@ -1,0 +1,23 @@
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "prettier.requireConfig": false,
+  "[python]": {
+    "editor.codeActionsOnSave": ["source.organizeImports"],
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+  "[toml]": { "editor.defaultFormatter": "tamasfe.even-better-toml" },
+  "ruff.lineLength": 100,
+  "files.exclude": {
+    "**/.gitkeep": true,
+    ".python-version": true,
+    "uv.lock": true
+  },
+  "github.copilot.enable": {
+    "*": true,
+    "dotenv": false,
+    "plaintext": false,
+    "properties": false,
+    "toml": false
+  }
+}
