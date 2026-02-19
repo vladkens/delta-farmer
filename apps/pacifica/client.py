@@ -142,10 +142,6 @@ class Client:
             proxy=proxy,
         )
 
-    def __repr__(self) -> str:
-        shortk = str(self.keypair.pubkey())[:4] + "..." + str(self.keypair.pubkey())[-4:]
-        return f"Pacifica(name={self.name}, pubkey={shortk})"
-
     async def call(self, method: HttpMethod, path: str, **kwargs):
         rep = await self.http.request(method, path, **kwargs)
 

@@ -21,8 +21,8 @@ async def main():
     sub.add_parser("info", help="Show accounts info")
 
     stats_parser = sub.add_parser("stats", help="Show trading stats")
-    stats_parser.add_argument("-g", "--group", choices=["week", "day"], default="week", help="How to group data")
-    stats_parser.add_argument("-f", "--filter", default="all", help="Which period(s) to show (all, prev, current, W5, 2025-02-19)")
+    stats_parser.add_argument("-g", "--group", choices=["week", "day"], default="week")
+    stats_parser.add_argument("-f", "--filter", default="all")
 
     handle_config = config_cli_parser(sub, fields=["privkey"])
 

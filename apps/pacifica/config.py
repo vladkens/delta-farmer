@@ -1,11 +1,9 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Don't blame me, blame the API docs
-import tomllib
-
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from core.crypto import decrypt_value, is_encrypted
-from core.models import DurationSec, SizeRange, TimeRange
+from core.models import DurationSec, SizeRange, TimeRange, load_config
 
 
 class AccountConfig(BaseModel):
@@ -36,6 +34,4 @@ class Config(BaseModel):
 
     @classmethod
     def load(cls, filepath: str):
-        with open(filepath, "rb") as fp:
-            obj = tomllib.load(fp)
-            return cls(**obj)
+        return load_config(cls, filepath)

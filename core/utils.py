@@ -1,5 +1,8 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Bugs are features in disguise
+import json
+import os
+import pickle
 import random
 import re
 from datetime import datetime, timedelta
@@ -29,6 +32,37 @@ def wait_msg(sec: float) -> str:
     until_dt = datetime.now() + timedelta(seconds=sec)
     until_dt = until_dt.isoformat().split(".")[0].split("T")[1]
     return f"Sleeping for {sec:.1f}s, next run at {until_dt}"
+
+
+# MARK: FS functions
+
+
+def pickle_load(filepath: str):
+    try:
+        with open(filepath, "rb") as fp:
+            return pickle.load(fp)
+    except FileNotFoundError:
+        return None
+
+
+def pickle_dump(filepath: str, data: object):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "wb") as fp:
+        pickle.dump(data, fp)
+
+
+def json_load(filepath: str):
+    try:
+        with open(filepath, "r") as fp:
+            return json.load(fp)
+    except FileNotFoundError:
+        return None
+
+
+def json_dump(filepath: str, data: object):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w") as fp:
+        json.dump(data, fp, indent=2, default=str)
 
 
 # MARK: Duration parsing

@@ -1,14 +1,17 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Sleep is overrated anyway
 import random
-from typing import Generic, TypeVar
+import sys
+import tomllib
+from typing import Generic, Type, TypeVar
 
-from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, ValidationError, model_validator
 from pydantic_core import core_schema
 
 from core.utils import parse_duration
 
-T = TypeVar("T", int, float)  # constrain if you want numeric types
+RangeT = TypeVar("RangeT", int, float)
+ConfigT = TypeVar("ConfigT", bound=BaseModel)
 
 
 class DurationSec(int):
@@ -28,22 +31,22 @@ class DurationSec(int):
         return core_schema.no_info_after_validator_function(cls, core_schema.union_schema(t))
 
 
-class Range(BaseModel, Generic[T]):
-    min: T = Field(..., gt=0)
-    max: T = Field(..., gt=0)
+class Range(BaseModel, Generic[RangeT]):
+    min: RangeT = Field(..., gt=0)
+    max: RangeT = Field(..., gt=0)
 
     @model_validator(mode="before")
     @classmethod
     def _coerce(cls, v):
         if isinstance(v, (list, tuple)):
             if len(v) != 2:
-                raise ValueError(f"{cls.__name__} expected 2 values, got {len(v)}")
+                raise ValueError(f"expected 2 values, got {len(v)}")
             return {"min": v[0], "max": v[1]}
 
         if isinstance(v, dict):
             return v
 
-        raise TypeError(f"Cannot coerce {cls.__name__} from {type(v).__name__}")
+        raise ValueError(f"expected list/tuple [min, max] or dict, got {type(v).__name__}")
 
     @model_validator(mode="after")
     def _verify(self):
@@ -60,3 +63,27 @@ class Range(BaseModel, Generic[T]):
 
 SizeRange = Range[float]
 TimeRange = Range[DurationSec]
+
+
+def load_config(config_cls: Type[ConfigT], filepath: str) -> ConfigT:
+    """Load and validate a Pydantic config from a TOML file with user-friendly errors."""
+    try:
+        with open(filepath, "rb") as fp:
+            obj = tomllib.load(fp)
+    except FileNotFoundError:
+        raise SystemExit(f"❌ Config file not found: {filepath}")
+    except tomllib.TOMLDecodeError as e:
+        raise SystemExit(f"❌ Invalid TOML syntax in {filepath}: {e}")
+
+    try:
+        return config_cls.model_validate(obj)
+    except ValidationError as e:
+        print(f"❌ Config validation failed for {filepath}\n", file=sys.stderr)
+        errors = []
+        for err in e.errors():
+            field = ".".join(str(x) for x in err["loc"])
+            msg = err["msg"]
+            errors.append(f"  • {field}: {msg}")
+        print("\n".join(errors), file=sys.stderr)
+        print(f"\n💡 Fix the errors above in {filepath}", file=sys.stderr)
+        raise SystemExit(1)
