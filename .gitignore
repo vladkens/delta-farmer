@@ -1,6 +1,7 @@
-.venv/
-uv.lock
+.cache/
 .env
-configs/
-/*.txt
+.venv/
 /*.py
+/*.txt
+configs/
+uv.lock

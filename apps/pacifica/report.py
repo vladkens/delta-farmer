@@ -23,6 +23,11 @@ def to_points_week(ts: int) -> str:
     return f"W{delta.days // 7 + 1}"
 
 
+def to_points_day(ts: int) -> str:
+    dt = datetime.fromtimestamp(ts // 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d")
+
+
 class Report:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -59,19 +64,34 @@ class Report:
 
         tbl.print()
 
-    async def weekly(self):
+    async def stats(self, period: str = "week", filter_period: str = "all"):
         gtrades: DD[list[Trade]] = defaultdict(lambda: defaultdict(list))
         gpoints: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
+
+        # Choose aggregation function
+        period_fn = to_points_day if period == "day" else to_points_week
 
         for acc in self.accs:
             trades = await acc.trades()
             for trade in trades:
-                week = to_points_week(trade.created_at)
-                gtrades[week][acc.name].append(trade)
+                period_key = period_fn(trade.created_at)
+                gtrades[period_key][acc.name].append(trade)
 
             points = await acc.points_history()
             for week, point in points.items():
                 gpoints[week][acc.name] = point
+
+        # Apply filter
+        all_periods = sorted(gtrades.keys())
+        if filter_period == "all":
+            periods_to_show = all_periods
+        elif filter_period == "prev":
+            periods_to_show = [all_periods[-2]] if len(all_periods) >= 2 else []
+        elif filter_period == "current":
+            periods_to_show = [all_periods[-1]] if all_periods else []
+        else:
+            # Specific period like "W5" or "2025-02-19"
+            periods_to_show = [filter_period] if filter_period in all_periods else []
 
         tbl = AutoTable(
             Column("Account", justify="left"),
@@ -87,11 +107,11 @@ class Report:
         )
 
         tvol = defaultdict(Decimal)
-        for week in sorted(gtrades.keys()):
-            tbl.subgroup(f"{week}")
-            for acc_name in sorted(gtrades[week].keys()):
-                trades = gtrades[week][acc_name]
-                points = gpoints[week][acc_name]
+        for period_key in periods_to_show:
+            tbl.subgroup(f"{period_key}")
+            for acc_name in sorted(gtrades[period_key].keys()):
+                trades = gtrades[period_key][acc_name]
+                points = gpoints.get(period_key, {}).get(acc_name, Decimal(0))
 
                 vol = sum(trade.amount * trade.price for trade in trades)
                 pnl = sum(trade.pnl for trade in trades)
