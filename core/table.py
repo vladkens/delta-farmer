@@ -1,5 +1,6 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | May contain traces of genius
+import decimal
 from dataclasses import dataclass
 from typing import Callable, cast
 
@@ -7,6 +8,8 @@ from rich import print as console_print
 from rich.box import SIMPLE, Box
 from rich.console import JustifyMethod
 from rich.table import Table
+
+from .logger import logger
 
 
 @dataclass
@@ -27,6 +30,18 @@ class RowProxy:
 
     def __getitem__(self, key):
         return self._row[self._map[key]]
+
+
+def _compute(col: Column, proxy: RowProxy):
+    assert col.compute is not None, "No compute function defined for column"
+
+    try:
+        return col.compute(proxy)
+    except (ZeroDivisionError, decimal.DivisionUndefined):
+        return None
+    except Exception as e:
+        logger.error(f"Error computing column '{col.name}' for row {proxy._row}: {e}")
+        return None
 
 
 class AutoTable:
@@ -73,10 +88,7 @@ class AutoTable:
         # computed columns
         for i, col in enumerate(self.columns):
             if col.compute:
-                try:
-                    totals[i] = col.compute(proxy)
-                except ZeroDivisionError:
-                    totals[i] = None
+                totals[i] = _compute(col, proxy)
 
         return totals
 
@@ -86,11 +98,8 @@ class AutoTable:
             rendered = []
 
             for i, col in enumerate(self.columns):
-                try:
-                    value = col.compute(proxy) if col.compute else row[i]
-                    rendered.append(col.fmt.format(value))
-                except ZeroDivisionError:
-                    rendered.append("n/a")
+                val = _compute(col, proxy) if col.compute else row[i]
+                rendered.append(col.fmt.format(val) if val is not None else "n/a")
 
             if gtitle:
                 tbl.add_row(gtitle if idx == 0 else "", *rendered)

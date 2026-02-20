@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from datetime import datetime
 from decimal import Decimal
 from functools import partial
 from typing import Literal, cast
@@ -198,8 +199,9 @@ class Client:
         res = await self.call("POST", "/account/points/history", json=msg)
         return {f"W{x['week_number']}": Decimal(x["total_points"]) for x in res["data"]}
 
-    async def trades(self):
+    async def trades(self, since: datetime | None = None):
         # https://docs.pacifica.fi/api-documentation/api/rest-api/account/get-trade-history
+        since_ts = int(since.timestamp() * 1000) if since else None
         has_more = True
         cursor = None
         items: dict[int, Trade] = {}
@@ -214,6 +216,9 @@ class Client:
 
             for t in res["data"]:
                 t = Trade(**t)
+                if since_ts and t.created_at < since_ts:
+                    has_more = False
+                    break
                 items[t.trade_id] = t
 
         return sorted(list(items.values()), key=lambda x: x.created_at)

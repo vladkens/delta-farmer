@@ -9,6 +9,36 @@ from typing import Protocol, Type, TypeVar
 from .logger import logger
 
 
+def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
+    """Retry decorator for async functions with exponential backoff."""
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            wait = delay
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_attempts:
+                        logger.debug(
+                            f"{func.__name__} failed (attempt {attempt}/{max_attempts}), retrying in {wait:.1f}s..."
+                        )
+                        await asyncio.sleep(wait)
+                        wait *= backoff
+                    else:
+                        logger.error(f"{func.__name__} failed after {max_attempts} attempts")
+
+            raise last_exception  # type: ignore
+
+        return wrapper
+
+    return decorator
+
+
 def ttl_cache(ttl: int):
     def decorator(func):
         cache = {}

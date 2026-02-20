@@ -12,16 +12,14 @@ Automated delta-neutral trading for crypto points farming. Execute hedged strate
 - 🔐 Encrypted private key storage
 - 🎲 Configurable trade sizes and timing
 
-## Supported Platforms
+## Supported Protocols
 
-- [Pacifica.fi](https://pacifica.fi) - Solana perpetuals DEX
-
-**In Progress:**
-
-- Variational - Coming soon
-- Ethereal - Coming soon
-
-More platforms coming soon (perp DEXs, prediction markets, etc.)
+| Protocol                                | Tech   | Status      | Description                   |
+| --------------------------------------- | ------ | ----------- | ----------------------------- |
+| [Pacifica](https://pacifica.fi)         | Solana | Ready       | Perpetuals DEX                |
+| [Omni](https://omni.variational.io)     | EVM    | Ready       | Perpetuals DEX by Variational |
+| [Ethereal](https://app.ethereal.trade/) | EVM    | Coming Soon | —                             |
+| [Nado](https://app.nado.xyz/)           | EVM    | Coming Soon | —                             |
 
 ## Installation
 
@@ -38,57 +36,97 @@ git clone https://github.com/vladkens/delta-farmer.git && cd delta-farmer
 
 # Install dependencies
 uv sync
+```
 
-# Create and configure your config file
+## Quick Start
+
+### Pacifica (Solana)
+
+```bash
+# Create config
 cp configs.example/pacifica.toml configs/pacifica.toml
-# Edit configs/pacifica.toml with your settings
+# Edit configs/pacifica.toml with your Solana private keys
 
-# Encrypt private keys (will prompt for password)
+# Encrypt private keys
 uv run -m apps.pacifica config encrypt
 
-# Optional: Set password in .env to avoid prompts
-# echo "DF_CONFIG_PASSWORD=your-password-here" >> .env
+# Start trading
+uv run -m apps.pacifica trade
+```
+
+### Omni (EVM)
+
+```bash
+# Create config
+cp configs.example/omni.toml configs/omni.toml
+# Edit configs/omni.toml with your EVM private keys
+
+# Encrypt private keys
+uv run -m apps.omni config encrypt
+
+# Start trading
+uv run -m apps.omni trade
 ```
 
 ## Usage
 
-All apps share common commands for trading and configuration:
+All protocols share common commands:
 
 ```bash
-# Replace <app> with: pacifica, or other supported platforms
+# Replace <app> with: pacifica, omni
 
-# Core trading commands
-uv run -m apps.<app> trade   # Start automated trading
-uv run -m apps.<app> close   # Close all open positions
-uv run -m apps.<app> stats   # View trading statistics
+# Trading
+uv run -m apps.<app> trade          # Start automated trading
+uv run -m apps.<app> close          # Close all open positions
+uv run -m apps.<app> info           # View account balances & points
+uv run -m apps.<app> stats          # View trading statistics (cached 1h)
+uv run -m apps.<app> stats last     # Show only previous period
+uv run -m apps.<app> stats --sync   # Force refresh cached data
+uv run -m apps.<app> clean          # Delete cached data
 
-# Configuration management
-uv run -m apps.<app> config encrypt  # Encrypt private keys in config
+# Config management
+uv run -m apps.<app> config encrypt  # Encrypt private keys
 uv run -m apps.<app> config decrypt  # Decrypt to view keys
 
-# View app-specific commands
+# Help
 uv run -m apps.<app> --help
-```
-
-**Example:**
-
-```bash
-uv run -m apps.pacifica trade
-uv run -m apps.pacifica --help
 ```
 
 ### Using Custom Configs
 
-Use the `-c` flag to specify different config files. Each config contains both strategy parameters and accounts:
+Use the `-c` flag to specify different config files:
 
 ```bash
-# Test different strategies
-uv run -m apps.pacifica -c configs/pacifica-strategy1.toml trade
-uv run -m apps.pacifica -c configs/pacifica-strategy2.toml trade
+# Run with custom config
+uv run -m apps.pacifica -c configs/pacifica-alt.toml trade
 
-# Run multiple instances with different configs
-uv run -m apps.pacifica -c configs/pacifica-set1.toml trade
-uv run -m apps.pacifica -c configs/pacifica-set2.toml trade
+# Run multiple instances
+uv run -m apps.omni -c configs/omni-set1.toml trade
+uv run -m apps.omni -c configs/omni-set2.toml trade
+```
+
+### Password Management
+
+```bash
+# Set password in .env to avoid prompts
+echo "DF_CONFIG_PASSWORD=your-password-here" >> .env
+```
+
+## Updating
+
+To update to the latest version:
+
+```bash
+# Stop running instances (Ctrl+C or kill the process)
+
+# Pull latest changes
+git pull
+
+# Update dependencies
+uv sync
+
+# Restart trading
+uv run -m apps.<app> trade
 ```
 
 ## How It Works
@@ -101,6 +139,11 @@ Delta-neutral trading maintains zero directional exposure by opening equal but o
 4. Earns trading volume for points/airdrops
 5. Closes positions after random duration
 6. Repeats with configurable cooldown
+
+## Recommended Services
+
+- [**Digital Ocean**](https://m.do.co/c/a97fd963258f) – VPC for running bots 24/7 in background
+- [**Proxy Shard**](https://proxyshard.com?ref=5406) – proxies for crypto activities
 
 ## Risk Disclaimer
 

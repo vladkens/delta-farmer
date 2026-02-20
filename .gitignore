@@ -1,4 +1,5 @@
 .cache/
+.claude/
 .env
 .venv/
 /*.py

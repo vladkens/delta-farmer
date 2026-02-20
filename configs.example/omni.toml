@@ -1,6 +1,6 @@
 # Trading parameters
 # Use config calculator to estimate volume: https://deluxe-bienenstitch-a67274.netlify.app/
-markets = ["BTC", "ETH", "SOL"]  # Perpetual contracts to trade (see https://pacifica.fi)
+markets = ["BTC", "ETH", "SOL"]  # Perpetual contracts to trade (see https://omni.variational.io)
 leverage = 10  # Leverage multiplier (1-50)
 
 trade_size_usd = { min = 140, max = 160 }  # Total size in USD (split 50/50 between LONG and SHORT positions)
@@ -9,9 +9,6 @@ trade_cooldown = { min = "3m", max = "6m" }  # Wait time between trades
 trade_heartbeat = "15s"  # Position monitoring interval
 
 pnl_limit = 0.25  # Close if P&L exceeds ±25% of position size
-use_limit = false  # Use limit orders instead of market (lower fees but may not fill)
-limit_wait = "60s"  # Max time to wait for limit order since first partial fill
-limit_market_fallback = true  # Use market order if limit fails (false = cancel & retry next cycle)
 first_as_main = true  # Always use first account as main (false = random selection)
 
 
@@ -19,15 +16,15 @@ first_as_main = true  # Always use first account as main (false = random selecti
 
 [[accounts]]
 name = "Account 1"
-privkey = "your-base58-private-key-here"  # Solana private key - run `config encrypt` after setup!
+privkey = "your-ethereum-private-key-here"  # EVM private key (0x...) - run `config encrypt` after setup!
 # proxy = "http://user:pass@proxy:port"  # Optional proxy
 # enabled = true  # Optional: enable/disable account (default: true)
 
 [[accounts]]
 name = "Account 2"
-privkey = "your-base58-private-key-here"
+privkey = "your-ethereum-private-key-here"
 
 # [[accounts]]
 # name = "Account 3"
-# privkey = "your-base58-private-key-here"
+# privkey = "your-ethereum-private-key-here"
 # enabled = false

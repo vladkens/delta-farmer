@@ -11,7 +11,8 @@
   "files.exclude": {
     "**/.gitkeep": true,
     ".python-version": true,
-    "uv.lock": true
+    "uv.lock": true,
+    "LICENSE": true
   },
   "github.copilot.enable": {
     "*": true,

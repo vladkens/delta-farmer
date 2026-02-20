@@ -6,7 +6,7 @@ lint:
 	uv run pyright
 
 update:
-	uv sync --upgrade
+	uv sync --upgrade --all-groups
 
 clean:
 	rm -rf .ruff_cache .venv uv.lock .python-version
@@ -15,7 +15,7 @@ clean:
 
 HOST=lab
 EXEC=ssh -tt $(HOST)
-SYNC=rsync -avz --delete-after --exclude={'.git','.venv','.ruff_cache','.DS_Store','*.pyc','.env'}
+SYNC=rsync -avz --delete-after --exclude={'.git','.venv','.*cache','.DS_Store','*.pyc','.env',}
 DDIR=~/delta-farmer
 UV=~/.local/bin/uv
 

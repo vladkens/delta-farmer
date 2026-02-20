@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TypeVar
 
+from filelock import FileLock
+
 from .logger import logger
 
 T = TypeVar("T")
@@ -28,27 +30,109 @@ def shuffle(items: list[T]) -> list[T]:
     return items
 
 
+def short_addr(addr: str, left: int = 6, right: int = 4) -> str:
+    return f"{addr[:left]}..{addr[-right:]}"
+
+
+def format_duration(sec: float) -> str:
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}s"
+    elif sec < 3600:
+        m, s = divmod(sec, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    else:
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+
+
 def wait_msg(sec: float) -> str:
     until_dt = datetime.now() + timedelta(seconds=sec)
     until_dt = until_dt.isoformat().split(".")[0].split("T")[1]
-    return f"Sleeping for {sec:.1f}s, next run at {until_dt}"
+    return f"Sleeping for {format_duration(sec)}, next run at {until_dt}"
+
+
+# MARK: Period functions
+
+
+def to_period_week(ts: int, genesis: datetime) -> str:
+    """Convert timestamp (ms) to week period string like W01, W02, etc."""
+    dt = datetime.fromtimestamp(ts // 1000, tz=genesis.tzinfo)
+    delta = dt - genesis
+    index = delta.days // 7 + 1
+    return f"W{index:02d}" if index > 0 else "OFF"
+
+
+def to_period_day(ts: int) -> str:
+    """Convert timestamp (ms) to day period string like 2025-02-19."""
+    from datetime import UTC
+
+    dt = datetime.fromtimestamp(ts // 1000, tz=UTC)
+    return dt.strftime("%Y-%m-%d")
+
+
+def parse_filter(filter_str: str, all_periods: list[str]) -> list[str]:
+    """Parse filter string and return list of periods to show.
+
+    Supported formats:
+    - "all": all periods
+    - "this": current (last) period
+    - "last": previous period
+    - "-1", "-2", "-3": index from end
+    - "W05", "2025-02-19": specific period
+    """
+    if not all_periods:
+        return []
+
+    if filter_str == "all":
+        return all_periods
+    elif filter_str == "this":
+        return [all_periods[-1]]
+    elif filter_str == "last" or filter_str == "prev":
+        return [all_periods[-2]] if len(all_periods) >= 2 else []
+    elif filter_str.lstrip("-").isdigit():
+        idx = int(filter_str)
+        return [all_periods[idx]] if abs(idx) <= len(all_periods) else []
+    elif filter_str in all_periods:
+        return [filter_str]
+    else:
+        return []
 
 
 # MARK: FS functions
 
 
-def pickle_load(filepath: str):
+def pickle_load(filepath: str, *, lock: bool = False, delete_on_error: bool = False):
     try:
-        with open(filepath, "rb") as fp:
-            return pickle.load(fp)
+        if lock:
+            with FileLock(f"{filepath}.lock", timeout=5):
+                with open(filepath, "rb") as fp:
+                    return pickle.load(fp)
+        else:
+            with open(filepath, "rb") as fp:
+                return pickle.load(fp)
     except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to load {filepath}: {e}")
+        if delete_on_error and os.path.exists(filepath):
+            os.remove(filepath)
         return None
 
 
-def pickle_dump(filepath: str, data: object):
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "wb") as fp:
-        pickle.dump(data, fp)
+def pickle_dump(filepath: str, data: object, *, lock: bool = False):
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        if lock:
+            with FileLock(f"{filepath}.lock", timeout=5):
+                with open(filepath, "wb") as fp:
+                    pickle.dump(data, fp)
+        else:
+            with open(filepath, "wb") as fp:
+                pickle.dump(data, fp)
+    except Exception as e:
+        logger.warning(f"Failed to save {filepath}: {e}")
 
 
 def json_load(filepath: str):
