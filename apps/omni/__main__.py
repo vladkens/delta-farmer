@@ -16,7 +16,8 @@ from .config import Config
 from .manager import Manager
 
 # https://docs.variational.io/omni/rewards/points
-GENESIS = datetime(2025, 12, 17, tzinfo=timezone.utc)
+# https://omni.variational.io/points (UI counts from -1 week)
+GENESIS = datetime(2025, 12, 17 - 7, tzinfo=timezone.utc)
 
 
 def load_accs(cfg: Config) -> list[Client]:
