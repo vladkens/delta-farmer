@@ -256,14 +256,16 @@ class HyenaClient(HyperLiquidClient):
         bal, rewards, fills, mode = await asyncio.gather(
             self.balance(),
             self.rewards(),
-            self.fills(),
+            self.fetch_fills(),
             self.account_mode(),
         )
         # HyperLiquid /info portfolio is overall HIP-3 PnL, not Hyena-only.
-        # Use Hyena trades data so `info` matches Hyena `stats` burn reporting.
-        hyena_fills = [f for f in fills if f.coin.startswith("hyna:")]
-        volume = sum((f.px * f.sz for f in hyena_fills), Decimal(0))
-        pnl = sum((f.closedPnl for f in hyena_fills), Decimal(0))
+        # Restrict to Hyena assets so `info` matches Hyena `stats` lifetime volume/burn reporting.
+        hyena_fills = [f for f in fills if str(f.get("coin", "")).startswith("hyna:")]
+        volume = sum(
+            (Decimal(str(f["px"])) * Decimal(str(f["sz"])) for f in hyena_fills), Decimal(0)
+        )
+        pnl = sum((Decimal(str(f.get("closedPnl", 0))) for f in hyena_fills), Decimal(0))
 
         addr = utils.short_addr(self.address)
         epts = rewards.balance.enaxPoints

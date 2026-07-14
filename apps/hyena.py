@@ -26,6 +26,10 @@ def _normalize_symbols(symbols: list[str]) -> list[str]:
     return [s if ":" in s else f"hyna:{s}" for s in symbols]
 
 
+def _is_hyena_fill(fill: dict) -> bool:
+    return str(fill.get("coin", "")).startswith("hyna:")
+
+
 # MARK: Reports
 
 
@@ -81,7 +85,7 @@ async def sync_fills(acc: HyenaClient, ttl: int) -> list[dict]:
     store_path = f".cache/hyena_{short_addr(acc.address)}_fills.pkl"
     store = DataStore(store_path, id_key="hash")
     await store.sync(acc.fetch_fills, ttl_sec=ttl)
-    return store.get_all()
+    return [fill for fill in store.get_all() if _is_hyena_fill(fill)]
 
 
 async def sync_rewards(acc: HyenaClient, ttl: int) -> list[dict]:
@@ -118,6 +122,8 @@ async def print_stats(
 
     for acc, fills in zip(accs, fills_list):
         for fill in fills:
+            if not _is_hyena_fill(fill):
+                continue
             dt = datetime.fromtimestamp(fill["time"] / 1000, tz=UTC)
             gtrades[HyenaClient.to_week_label(dt)][acc.name].append(fill)
 

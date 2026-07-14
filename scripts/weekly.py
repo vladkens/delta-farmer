@@ -168,6 +168,8 @@ def hyena_stats() -> Stats:
     out: Stats = {}
     for path in glob_cache("hyena_", "_fills.pkl"):
         for r in load_pkl(path):
+            if not r.get("coin", "").startswith("hyna:"):
+                continue
             dt = datetime.fromtimestamp(r["time"] / 1000, tz=UTC)
             lbl = HyenaClient.to_week_label(dt)
             vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))

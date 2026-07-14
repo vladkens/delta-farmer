@@ -1,3 +1,13 @@
+## v0.8.2 – 2026-07-14
+
+### Fixes
+
+- Fixed Omni login flow.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.8.1...v0.8.2
+
+---
+
 ## v0.8.1 – 2026-06-14
 
 ### Features

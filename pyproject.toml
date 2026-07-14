@@ -1,6 +1,6 @@
 [project]
 name = "delta-farmer"
-version = "0.8.1"
+version = "0.8.2"
 description = "Automated delta-neutral trading for crypto points farming across perpetual DEXs"
 readme = "readme.md"
 requires-python = "==3.14.*"
