@@ -63,4 +63,5 @@ error-on-warning = true
 
 [tool.ty.rules]
 all = "error"
+missing-type-argument = "ignore"
 missing-override-decorator = "ignore"
