@@ -14,6 +14,7 @@ from lib.decorators import bind_log_context, retry, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
+from lib.unwaf_cf import ensure_cf_clearance
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side, TradingClient
 from strategy.execution import EntryQuality
 
@@ -125,7 +126,11 @@ class OmniClient:
         self.name = name
         self.http = AsyncHttp(
             baseurl=API_URL,
-            headers={"Origin": APP_URL, "Referer": f"{APP_URL}/"},
+            headers={
+                "Origin": APP_URL,
+                "Referer": f"{APP_URL}/",
+                "vr-connected-address": self.address,
+            },
             proxy=proxy,
             cookies_file=f".cache/omni_{utils.short_addr(self.address)}_http.pkl",
         )
@@ -146,6 +151,11 @@ class OmniClient:
     async def _ensure_auth(self):
         if "vr-token" in self.http.session.cookies:
             return True
+        clearance = await ensure_cf_clearance(self.http, APP_URL)
+        if clearance and not clearance.cf_clearance:
+            logger.debug(
+                f"Cloudflare JSD solve did not return cf_clearance: {clearance.status_code}"
+            )
         pld = {"address": self.address}
         rep = await self.http.request("POST", f"{API_URL}/auth/generate_signing_data", json=pld)
         if not rep.text.startswith("omni.variational.io wants you to"):

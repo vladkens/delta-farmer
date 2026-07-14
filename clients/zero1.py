@@ -33,7 +33,7 @@ from lib.decorators import bind_log_context, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod, NotFoundError
 from lib.logger import logger
 from lib.models import AccountConfig
-from lib.unwaf import ensure_unwaf
+from lib.unwaf_vc import ensure_unwaf
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side, TradingClient
 
 # Nord (01.xyz) protobuf schema — action types, field numbers, error codes, FillMode enum:
