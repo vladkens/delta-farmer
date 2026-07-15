@@ -14,8 +14,16 @@ from lib.decorators import bind_log_context, retry, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
-from lib.unwaf_cf import ensure_cf_clearance
-from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side, TradingClient
+from lib.unwaf_cf import USER_AGENT, ensure_cf_clearance, solve_managed_cf_clearance
+from strategy import (
+    Order,
+    OrderBook,
+    OrderStatus,
+    Position,
+    ProfileInfo,
+    Side,
+    TradingClient,
+)
 from strategy.execution import EntryQuality
 
 API_URL = "https://omni.variational.io/api"
@@ -124,9 +132,11 @@ class OmniClient:
         self.account = utils.parse_eth_key(privkey, name)
         self.address = self.account.address
         self.name = name
+        self.proxy = proxy
         self.http = AsyncHttp(
             baseurl=API_URL,
             headers={
+                "User-Agent": USER_AGENT,
                 "Origin": APP_URL,
                 "Referer": f"{APP_URL}/",
                 "vr-connected-address": self.address,
@@ -135,14 +145,37 @@ class OmniClient:
             cookies_file=f".cache/omni_{utils.short_addr(self.address)}_http.pkl",
         )
 
-    @retry(max_attempts=9, delay=2.0)  # bypass cloudflare
+    async def _request(self, method: HttpMethod, url: str, **kwargs):
+        rep = await self.http.request(method, url, **kwargs)
+        is_cf_challenge = rep.status_code in {403, 429, 503} and (
+            ">Just a moment...<" in rep.text or "/cdn-cgi/challenge-platform/" in rep.text
+        )
+        if not is_cf_challenge:
+            return rep
+
+        target_url = (
+            url if url.startswith(("http://", "https://")) else f"{API_URL}/{url.lstrip('/')}"
+        )
+        if "cType: 'managed'" in rep.text:
+            logger.debug(f"Cloudflare Managed Challenge {method} {url}; requesting cf_clearance")
+            await solve_managed_cf_clearance(self.http, target_url, proxy=self.proxy)
+        else:
+            logger.debug(f"Cloudflare JSD challenged {method} {url}; refreshing cf_clearance")
+            if not await ensure_cf_clearance(self.http, target_url, force=True):
+                return rep
+        return await self.http.request(method, url, **kwargs)
+
+    @retry(max_attempts=3, delay=2.0)  # bypass cloudflare
     async def warmup(self) -> None:
-        rep = await self.http.request("GET", "https://omni.variational.io/")
+        rep = await self._request("GET", f"{APP_URL}/portfolio?tab=positions")  # app access
         assert rep.ok, f"Warmup failed: {rep.status_code} {rep.text[:200]}"
 
-    @retry(max_attempts=9, delay=2.0)  # bypass cloudflare
+        rep = await self._request("GET", "/banner")  # api access
+        assert rep.ok, f"Warmup failed: {rep.status_code} {rep.text[:200]}"
+
+    @retry(max_attempts=3, delay=2.0)  # bypass cloudflare
     async def registered(self) -> bool:
-        rep = await self.http.request("GET", f"/auth/company/{self.address}")
+        rep = await self._request("GET", f"/auth/company/{self.address}")
         rep.raise_for_status()
         res = rep.json()
         return res["settlement_pool"] is not None
@@ -151,13 +184,8 @@ class OmniClient:
     async def _ensure_auth(self):
         if "vr-token" in self.http.session.cookies:
             return True
-        clearance = await ensure_cf_clearance(self.http, APP_URL)
-        if clearance and not clearance.cf_clearance:
-            logger.debug(
-                f"Cloudflare JSD solve did not return cf_clearance: {clearance.status_code}"
-            )
         pld = {"address": self.address}
-        rep = await self.http.request("POST", f"{API_URL}/auth/generate_signing_data", json=pld)
+        rep = await self._request("POST", "/auth/generate_signing_data", json=pld)
         if not rep.text.startswith("omni.variational.io wants you to"):
             raise ApiError("Unexpected signing data", rep)
 
@@ -165,14 +193,14 @@ class OmniClient:
         sig = self.account.sign_message(msg).signature.hex().replace("0x", "")
 
         pld = {"address": self.address, "signed_message": sig}
-        rep = await self.http.request("POST", f"{API_URL}/auth/login", json=pld)
+        rep = await self._request("POST", "/auth/login", json=pld)
         if not rep.ok or "vr-token" not in self.http.session.cookies:
             raise ApiError("Login failed", rep)
         return True
 
     async def _call(self, method: HttpMethod, path: str, **kwargs):
         await self._ensure_auth()
-        rep = await self.http.request(method, path, **kwargs)
+        rep = await self._request(method, path, **kwargs)
         if not rep.ok:
             raise ApiError("API error", rep)
         return rep.json()

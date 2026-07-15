@@ -2,9 +2,13 @@
 # Copyright (c) vladkens | MIT License | No AI was harmed making this
 import argparse
 import asyncio
+import os
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
+from typing import Self
+
+from pydantic import Field, SecretStr
 
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
 from lib.cli import create_cli, run_app
@@ -12,8 +16,17 @@ from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
-from strategy import StrategyConfig
+from strategy import StrategyConfig, load_config
 from strategy.runner import close_all, print_positions, run_groups
+
+
+class OmniConfig(StrategyConfig):
+    captcha_key: SecretStr = Field(default=SecretStr(""), repr=False)
+
+    @classmethod
+    def load(cls, filepath: str) -> Self:
+        return load_config(cls, filepath)
+
 
 # MARK: Storages
 
@@ -220,10 +233,12 @@ async def main():
     cli = await create_cli(
         "omni",
         "configs/omni.toml",
-        ["privkey"],
+        ["privkey", "captcha_key"],
         custom_commands={"competition": setup_competition_cli},
     )
-    cfg = StrategyConfig.load(cli.config)
+    cfg = OmniConfig.load(cli.config)
+    if key := cfg.captcha_key.get_secret_value():
+        os.environ["CAPTCHA_KEY"] = key
 
     accs = [(OmniClient.from_config(x), x.enabled) for x in cfg.accounts]
     all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]

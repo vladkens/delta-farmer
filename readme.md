@@ -221,6 +221,20 @@ Omni competition commands check the active tournament window, join status, eligi
 and leaderboard places. Hyena and Onyx migration commands switch HyperLiquid-backed accounts to
 Unified Account mode when the exchange reports a legacy account mode.
 
+### Omni Cloudflare challenges
+
+Omni handles Cloudflare challenges automatically. By default it uses the shared solver gateway,
+so no extra configuration is required. To use your own Astrum solver account instead, [register
+with Astrum](https://solver.astrum.foundation/), add funds, create an API key, and add it to
+`configs/omni.toml`:
+
+```toml
+captcha_key = "your-astrum-key"
+```
+
+`captcha_key` takes priority over the `CAPTCHA_KEY` value in `.env`. Leave it unset to use the
+shared gateway. Run `uv run apps/omni.py config encrypt` after adding the key.
+
 ---
 
 ## Configuration Reference

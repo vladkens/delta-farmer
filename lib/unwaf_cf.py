@@ -1,14 +1,18 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | If it compiles, ship it
+import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.impersonate import DEFAULT_CHROME
 
-from lib.http import AsyncHttp
+from lib.http import AsyncHttp, parse_proxy
+from lib.logger import logger
 
 # Algorithm adapted from: https://github.com/B00H0O/cloudflare-jsd-solver
 #
@@ -33,13 +37,8 @@ _APP_VERSION = (
     f"(KHTML, like Gecko) Chrome/{_default_chrome_version()} Safari/537.36"
 )
 USER_AGENT = f"Mozilla/{_APP_VERSION}"
-
-
-@dataclass(frozen=True)
-class CfClearanceResult:
-    status_code: int
-    endpoint: str
-    cf_clearance: str | None
+ASTRUM_API = "https://solver.astrum.foundation/api"
+GATEWAY_API = "https://delta-gateway.fly.dev/api"
 
 
 @dataclass(frozen=True)
@@ -275,7 +274,7 @@ def _build_payload(target_url: str) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-async def solve_cf_clearance(http: AsyncHttp, target_url: str) -> CfClearanceResult:
+async def solve_cf_clearance(http: AsyncHttp, target_url: str) -> bool:
     """Run Cloudflare JSD oneshot flow and leave received cookies in http.session."""
     origin = _origin_from_url(target_url)
     page = await http.request("GET", target_url)
@@ -291,7 +290,7 @@ async def solve_cf_clearance(http: AsyncHttp, target_url: str) -> CfClearanceRes
         f"{script_data.sitekey}/jsd/oneshot/{script_data.path}{params.r}"
     )
 
-    rep = await http.request(
+    await http.request(
         "POST",
         endpoint,
         data=body,
@@ -310,20 +309,72 @@ async def solve_cf_clearance(http: AsyncHttp, target_url: str) -> CfClearanceRes
         default_headers=False,
     )
 
-    return CfClearanceResult(
-        status_code=rep.status_code,
-        endpoint=endpoint,
-        cf_clearance=_find_cookie(http, "cf_clearance"),
-    )
+    return bool(_find_cookie(http, "cf_clearance"))
 
 
-async def ensure_cf_clearance(http: AsyncHttp, target_url: str) -> CfClearanceResult | None:
-    """Solve Cloudflare JSD only when cf_clearance is not already present."""
-    if _find_cookie(http, "cf_clearance"):
-        return None
+async def ensure_cf_clearance(http: AsyncHttp, target_url: str, *, force: bool = False) -> bool:
+    """Solve Cloudflare JSD when no clearance exists or Cloudflare rejected one."""
+    if not force and _find_cookie(http, "cf_clearance"):
+        return True
     try:
         return await solve_cf_clearance(http, target_url)
     except ValueError as e:
         if "Cloudflare JSD params not found" in str(e):
-            return None
+            return False
         raise
+
+
+async def solve_managed_cf_clearance(
+    http: AsyncHttp, target_url: str, *, proxy: str | None
+) -> None:
+    """Request a Cloudflare Managed Challenge clearance from Astrum."""
+    api_key = os.getenv("CAPTCHA_KEY", "")
+    solver_api = ASTRUM_API if api_key else GATEWAY_API
+
+    proxy_url = parse_proxy(proxy)
+    if not proxy_url:
+        raise RuntimeError("Proxy is required for Cloudflare Managed Challenge")
+
+    async with AsyncSession(timeout=(10, 60)) as session:
+        task = {
+            "type": "cf_clearance",
+            "websiteURL": target_url,
+            "proxyURL": proxy_url,
+            "userAgent": USER_AGENT,
+        }
+
+        rep = await session.post(
+            f"{solver_api}/createTask", json={"clientKey": api_key, "task": task}
+        )
+        res = rep.json()
+        if res.get("errorId", 0) != 0 or not res.get("taskId"):
+            raise RuntimeError(f"Cloudflare task creation failed: {res}")
+
+        task_id = res["taskId"]
+        logger.debug(f"Cloudflare task {task_id} created")
+        for _ in range(90):
+            await asyncio.sleep(3)
+            rep = await session.post(
+                f"{solver_api}/getTaskResult",
+                json={"clientKey": api_key, "task": {"taskId": task_id, "type": "cf_clearance"}},
+            )
+            res = rep.json()
+            token = res.get("solution", {}).get("token")
+            status = res.get("status")
+
+            if status in {"opened", "in_progress"}:
+                continue
+
+            if status == "closed":
+                if not token:
+                    raise RuntimeError("Cloudflare task closed without cf_clearance")
+                host = urlparse(target_url).hostname
+                if not host:
+                    raise RuntimeError(f"Invalid Cloudflare target URL: {target_url}")
+                http.session.cookies.set("cf_clearance", token, domain=host, path="/")
+                logger.debug(f"Cloudflare task {task_id} solved")
+                return
+
+            raise RuntimeError(f"Cloudflare task failed: {res}")
+
+    raise RuntimeError("Cloudflare task timed out")

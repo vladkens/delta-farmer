@@ -77,7 +77,8 @@ def cli_anyarg(
             if not isinstance(existing, argparse._SubParsersAction):
                 continue
             for subparser in existing.choices.values():
-                _apply(subparser, is_root=False)
+                if isinstance(subparser, argparse.ArgumentParser):
+                    _apply(subparser, is_root=False)
 
     _apply(parser, is_root=True)
 

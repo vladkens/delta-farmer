@@ -1,3 +1,17 @@
+## v0.8.3 – 2026-07-15
+
+### Features
+
+- Added optional `captcha_key` configuration for using a personal Astrum solver account with Omni.
+
+### Fixes
+
+- Fixed Omni requests failing on Cloudflare challenges by refreshing the required clearance automatically.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.8.2...v0.8.3
+
+---
+
 ## v0.8.2 – 2026-07-14
 
 ### Fixes
