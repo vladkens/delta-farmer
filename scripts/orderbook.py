@@ -12,12 +12,12 @@ from decimal import Decimal
 from apps.hyperliquid import HyperLiquidNativeClient
 from clients.ethereal import EtherealClient
 from clients.hyena import HyenaClient
+from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
 from clients.onyx import OnyxClient
 from clients.pacifica import PacificaClient
 from clients.rise import RiseClient
-from clients.zero1 import ZeroOneClient
 from strategy import OrderBook, OrderBookLevel, StrategyConfig
 
 EXCHANGES = [
@@ -29,7 +29,7 @@ EXCHANGES = [
     "onyx",
     "pacifica",
     "rise",
-    "zero1",
+    "n1",
 ]
 
 
@@ -69,7 +69,7 @@ async def snapshot(exchange: str, config_path: str, levels: int) -> tuple[str, s
         "onyx": OnyxClient,
         "pacifica": PacificaClient,
         "rise": RiseClient,
-        "zero1": ZeroOneClient,
+        "n1": N1Client,
     }
 
     cfg = StrategyConfig.load(config_path)

@@ -28,12 +28,12 @@ from typing import Any
 
 from clients.ethereal import EtherealClient
 from clients.hyena import HyenaClient, HyenaHistoryItem
+from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
 from clients.onyx import OnyxClient
 from clients.pacifica import PacificaClient
 from clients.rise import RiseClient
-from clients.zero1 import ZeroOneClient
 from lib.table import AutoTable, Column
 
 CACHE = os.path.join(os.path.dirname(__file__), "..", ".cache")
@@ -136,30 +136,22 @@ def pacifica_stats() -> Stats:
     return out
 
 
-def zero1_stats() -> Stats:
+def n1_stats() -> Stats:
     vols: defaultdict[str, Decimal] = defaultdict(Decimal)
     burns: defaultdict[str, Decimal] = defaultdict(Decimal)
     seen: set[str] = set()
-    for path in glob_cache("zero1_", "_trades_maker.pkl") + glob_cache(
-        "zero1_", "_trades_taker.pkl"
-    ):
+    for path in glob_cache("n1_", "_trades_maker.pkl") + glob_cache("n1_", "_trades_taker.pkl"):
         for r in load_pkl(path):
             tid = str(r.get("tradeId", r.get("uid", "")))
             if tid in seen:
                 continue
             seen.add(tid)
-            lbl = ZeroOneClient.to_week_label(parse_dt(r["time"]))
+            lbl = N1Client.to_week_label(parse_dt(r["time"]))
             vols[lbl] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
-            if "fee" in r:
-                burns[lbl] += Decimal(str(r["fee"]))
-    for path in glob_cache("zero1_", "_history_pnl.pkl"):
+    for path in glob_cache("n1_", "_pnl.pkl"):
         for r in load_pkl(path):
-            lbl = ZeroOneClient.to_week_label(parse_dt(r["time"]))
-            burns[lbl] -= Decimal(str(r["tradingPnl"]))
-    for path in glob_cache("zero1_", "_history_funding.pkl"):
-        for r in load_pkl(path):
-            lbl = ZeroOneClient.to_week_label(parse_dt(r["time"]))
-            burns[lbl] -= Decimal(str(r["fundingPnl"]))
+            lbl = N1Client.to_week_label(parse_dt(r["day"]))
+            burns[lbl] -= Decimal(str(r["pnl"]))
     all_lbls = set(vols) | set(burns)
     return {lbl: (vols[lbl], burns[lbl]) for lbl in all_lbls}
 
@@ -251,13 +243,13 @@ def pacifica_pts() -> Pts:
     )
 
 
-def zero1_pts() -> Pts:
+def n1_pts() -> Pts:
     return _pts_by_period(
-        "zero1_",
+        "n1_",
         "_points.pkl",
         "start_window",
         ["points"],
-        ZeroOneClient.to_week_label,
+        N1Client.to_week_label,
     )
 
 
@@ -398,12 +390,10 @@ def rise_burn_weeks() -> ISOData:
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
 
-def zero1_burn_weeks() -> ISOData:
+def n1_burn_weeks() -> ISOData:
     out = _isoout()
     seen: set[str] = set()
-    for path in glob_cache("zero1_", "_trades_maker.pkl") + glob_cache(
-        "zero1_", "_trades_taker.pkl"
-    ):
+    for path in glob_cache("n1_", "_trades_maker.pkl") + glob_cache("n1_", "_trades_taker.pkl"):
         for r in load_pkl(path):
             tid = str(r.get("tradeId", r.get("uid", "")))
             if tid in seen:
@@ -411,16 +401,11 @@ def zero1_burn_weeks() -> ISOData:
             seen.add(tid)
             w = _to_iso_week(parse_dt(r["time"]))
             out[w][0] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
-            out[w][1] += Decimal(str(r.get("fee", 0)))
-    for path in glob_cache("zero1_", "_history_pnl.pkl"):
+    for path in glob_cache("n1_", "_pnl.pkl"):
         for r in load_pkl(path):
-            w = _to_iso_week(parse_dt(r["time"]))
-            out[w][1] -= Decimal(str(r["tradingPnl"]))
-    for path in glob_cache("zero1_", "_history_funding.pkl"):
-        for r in load_pkl(path):
-            w = _to_iso_week(parse_dt(r["time"]))
-            out[w][1] -= Decimal(str(r["fundingPnl"]))
-    for w, pts in _isopts("zero1_", "start_window", "points").items():
+            w = _to_iso_week(parse_dt(r["day"]))
+            out[w][1] -= Decimal(str(r["pnl"]))
+    for w, pts in _isopts("n1_", "start_window", "points").items():
         out[w][2] += pts
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
@@ -437,7 +422,7 @@ EXCHANGES: list[tuple[str, Any, Any, Any | None]] = [
     ("Onyx", onyx_stats, onyx_pts, OnyxClient.to_week_label),
     ("Pacifica", pacifica_stats, pacifica_pts, None),
     ("Rise", rise_stats, rise_pts, RiseClient.to_week_label),
-    ("Zero1", zero1_stats, zero1_pts, None),
+    ("N1", n1_stats, n1_pts, None),
 ]
 
 BURN_EXCHANGES = [
@@ -448,7 +433,7 @@ BURN_EXCHANGES = [
     ("Onyx", onyx_burn_weeks),
     ("Pacifica", pacifica_burn_weeks),
     ("Rise", rise_burn_weeks),
-    ("Zero1", zero1_burn_weeks),
+    ("N1", n1_burn_weeks),
 ]
 
 

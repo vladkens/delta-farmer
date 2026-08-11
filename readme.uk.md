@@ -53,7 +53,11 @@ Delta-farmer автоматично відкриває узгоджені long �
 | Onyx     | EVM     | [onyx.live](https://app.onyx.live/)           | [Sign up](https://app.onyx.live/?ref=BB7M4BW3)                     |
 | Pacifica | Solana  | [pacifica.fi](https://app.pacifica.fi)        | [Sign up](https://app.pacifica.fi?referral=uid127)                 |
 | RiseX    | EVM     | [rise.trade](https://www.rise.trade/)         | [Sign up](https://www.rise.trade/)                                 |
-| 01.xyz   | EVM     | [01.xyz](https://01.xyz/)                     | [Sign up](https://01.xyz/ref/019d07db-c7ef-757e-80a4-8a40213488d2) |
+| N1       | EVM     | [n1.xyz](https://app.n1.xyz/)                 | [Sign up](https://app.n1.xyz/r/vladkens)                           |
+
+### Оновлення бірж
+
+- **01.xyz → N1** — біржа переїхала на [n1.xyz](https://app.n1.xyz/).
 
 ---
 
@@ -106,7 +110,7 @@ cd delta-farmer
 
 ## Швидкий старт
 
-Усюди нижче замінюйте `<app>` на назву exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `onyx`, `rise` або `zero1`.
+Усюди нижче замінюйте `<app>` на назву exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `onyx`, `rise` або `n1`.
 
 **Крок 1 — створіть config**
 

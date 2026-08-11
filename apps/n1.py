@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TypeVar
 
-from clients.zero1 import ZeroOneClient, ZeroOnePoint
+from clients.n1 import N1Client, N1Point
 from lib.cli import create_cli, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -20,45 +20,54 @@ DD = defaultdict[str, defaultdict[str, T]]
 # MARK: Storages
 
 
-async def sync_points(acc: ZeroOneClient, ttl: int) -> list[ZeroOnePoint]:
-    store_path = f".cache/zero1_{short_addr(acc.address)}_points.pkl"
-    store = DataStore(store_path, id_key="start_window", model=ZeroOnePoint)
+async def sync_points(acc: N1Client, ttl: int) -> list[N1Point]:
+    store_path = f".cache/n1_{short_addr(acc.address)}_points.pkl"
+    store = DataStore(store_path, id_key="stage", model=N1Point)
     await store.sync(lambda _: acc.points_history(), ttl_sec=ttl)
     return store.get_all()
 
 
-async def sync_raw(acc: ZeroOneClient, store_name: str, path: str, ttl: int) -> list[dict]:
-    store_path = f".cache/zero1_{short_addr(acc.address)}_{store_name}.pkl"
+async def sync_trades(acc: N1Client, role: str, acc_id: int, ttl: int) -> list[dict]:
+    fee_key = f"{role}Fee"
+    store_path = f".cache/n1_{short_addr(acc.address)}_trades_{role}.pkl"
     store = DataStore(store_path, id_key="uid")
-    await store.sync(lambda since: acc.paged(path, since=since), ttl_sec=ttl)
+    needs_backfill = any(t.get(fee_key) is None for t in store.get_all())
+    path = f"/trades?{role}Id={acc_id}"
+    await store.sync(
+        lambda since: acc.paged(path, since=None if needs_backfill else since),
+        ttl_sec=0 if needs_backfill else ttl,
+    )
     return store.get_all()
 
 
-async def _fetch_stats(acc: ZeroOneClient, ttl: int) -> dict:
+async def sync_pnl(acc: N1Client, acc_id: int, ttl: int) -> list[dict]:
+    store_path = f".cache/n1_{short_addr(acc.address)}_pnl.pkl"
+    store = DataStore(store_path, id_key="day")
+    await store.sync(lambda _: acc.daily_pnl(acc_id), ttl_sec=ttl)
+    return store.get_all()
+
+
+async def _fetch_stats(acc: N1Client, ttl: int) -> dict:
     _, acc_id = await acc._ensure_session()
-    maker, taker, pnl, funding = await asyncio.gather(
-        sync_raw(acc, "trades_maker", f"/trades?makerId={acc_id}", ttl),
-        sync_raw(acc, "trades_taker", f"/trades?takerId={acc_id}", ttl),
-        sync_raw(acc, "history_pnl", f"/account/{acc_id}/history/pnl", ttl),
-        sync_raw(acc, "history_funding", f"/account/{acc_id}/history/funding", ttl),
+    maker, taker, pnl = await asyncio.gather(
+        sync_trades(acc, "maker", acc_id, ttl),
+        sync_trades(acc, "taker", acc_id, ttl),
+        sync_pnl(acc, acc_id, ttl),
     )
 
-    # todo: trade object don't have historical fee, try to emulate it with "current fee"
-    tr, mr = await acc.get_fee_rates()
-
     for t in maker:
-        t["fee"] = Decimal(str(t["price"])) * Decimal(str(t["baseSize"])) * mr
+        t["fee"] = Decimal(str(t["makerFee"]))
     for t in taker:
-        t["fee"] = Decimal(str(t["price"])) * Decimal(str(t["baseSize"])) * tr
+        t["fee"] = Decimal(str(t["takerFee"]))
 
     trades = maker + taker
-    return {"trades": trades, "pnl": pnl, "funding": funding}
+    return {"trades": trades, "pnl": pnl}
 
 
 # MARK: Reports
 
 
-async def print_info(accs: list[ZeroOneClient]):
+async def print_info(accs: list[N1Client]):
     tbl = AutoTable(
         Column("", justify="left"),
         Column("Account", justify="left"),
@@ -70,7 +79,7 @@ async def print_info(accs: list[ZeroOneClient]):
         Column("Balance", "{:,.2f}", total=sum),
     )
 
-    async def row(acc: ZeroOneClient):
+    async def row(acc: N1Client):
         await acc.warmup()
         p = await acc.profile() if await acc.registered() else None
         a = short_addr(acc.address)
@@ -84,11 +93,11 @@ async def print_info(accs: list[ZeroOneClient]):
     tbl.print()
 
 
-async def print_stats(accs: list[ZeroOneClient], period="week", filter_period="all", force=False):
+async def print_stats(accs: list[N1Client], period="week", filter_period="all", force=False):
     ttl = 0 if force else 3600
 
     def period_fn(dt: datetime) -> str:
-        return to_period_day(dt) if period == "day" else ZeroOneClient.to_week_label(dt)
+        return to_period_day(dt) if period == "day" else N1Client.to_week_label(dt)
 
     stats_list = await gather_accs(accs, lambda acc: _fetch_stats(acc, ttl))
     all_points = await gather_accs(accs, lambda acc: sync_points(acc, ttl))
@@ -96,18 +105,13 @@ async def print_stats(accs: list[ZeroOneClient], period="week", filter_period="a
     gcnt: DD[int] = defaultdict(lambda: defaultdict(int))
     gpnl: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
     gfee: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
-    gfnd: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
     gpts: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
     gvol: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
 
     for acc, stats in zip(accs, stats_list):
         for t in stats["pnl"]:
-            dt = datetime.fromisoformat(t["time"].rstrip("Z")).replace(tzinfo=UTC)
-            gpnl[period_fn(dt)][acc.name] += Decimal(str(t["tradingPnl"]))
-
-        for t in stats["funding"]:
-            dt = datetime.fromisoformat(t["time"].rstrip("Z")).replace(tzinfo=UTC)
-            gfnd[period_fn(dt)][acc.name] += Decimal(str(t["fundingPnl"]))
+            dt = datetime.fromisoformat(t["day"]).replace(tzinfo=UTC)
+            gpnl[period_fn(dt)][acc.name] += Decimal(str(t["pnl"]))
 
         for t in stats["trades"]:
             dt = datetime.fromisoformat(t["time"].rstrip("Z")).replace(tzinfo=UTC)
@@ -117,9 +121,9 @@ async def print_stats(accs: list[ZeroOneClient], period="week", filter_period="a
 
     for acc, pts in zip(accs, all_points):
         for p in pts:
-            gpts[period_fn(p.start_window)][acc.name] = p.points
+            gpts[period_fn(p.start_window)][acc.name] += p.points
 
-    all_periods = sorted(gpnl.keys() | gfee.keys() | gfnd.keys() | gpts.keys())
+    all_periods = sorted(gpnl.keys() | gfee.keys() | gpts.keys())
     periods_to_show = parse_filter(filter_period, all_periods)
     all_names = [acc.name for acc in accs]
 
@@ -131,14 +135,12 @@ async def print_stats(accs: list[ZeroOneClient], period="week", filter_period="a
             pts = gpts[pk].get(name, Decimal(0))
             pnl = gpnl[pk].get(name, Decimal(0))
             fee = gfee[pk].get(name, Decimal(0))
-            fnd = gfnd[pk].get(name, Decimal(0))
-            rpnl = pnl + fnd - fee
             vol = gvol[pk].get(name, Decimal(0))
 
             if not vol and not pts:
                 continue
 
-            rows.append(PeriodRow(name, cnt, vol, -rpnl, pts, fee))
+            rows.append(PeriodRow(name, cnt, vol, -pnl, pts, fee))
         periods_data[pk] = rows
 
     render_stats(periods_data, periods_to_show, pprice_fmt="{:,.3f}")
@@ -148,10 +150,10 @@ async def print_stats(accs: list[ZeroOneClient], period="week", filter_period="a
 
 
 async def main():
-    cli = await create_cli("zero1", "configs/zero1.toml", ["privkey"])
+    cli = await create_cli("n1", "configs/n1.toml", ["privkey"])
     cfg = StrategyConfig.load(cli.config)
 
-    accs = [(ZeroOneClient.from_config(x), x.enabled) for x in cfg.accounts]
+    accs = [(N1Client.from_config(x), x.enabled) for x in cfg.accounts]
     all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]
 
     match cli.command:

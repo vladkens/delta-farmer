@@ -2,11 +2,8 @@
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
 import asyncio
 import base64
-import hashlib
 import json
-import re
 import time
-import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Self
@@ -33,75 +30,18 @@ from lib.decorators import bind_log_context, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod, NotFoundError
 from lib.logger import logger
 from lib.models import AccountConfig
-from lib.unwaf_vc import ensure_unwaf
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side, TradingClient
 
-# Nord (01.xyz) protobuf schema — action types, field numbers, error codes, FillMode enum:
-# https://zo-devnet.n1.xyz/schema.proto
+# Nord protobuf schema — action types, field numbers, error codes, FillMode enum:
+# https://zo-mainnet.n1.xyz/schema.proto
 # All error codes referenced in this file (e.g. 133, 140) are defined in the Error enum there.
-# Other docs: https://docs.01.xyz/reference/rest-api
 
 NORD_API = "https://zo-mainnet.n1.xyz"
+N1_API = "https://api.n1.xyz"
+N1_APP = "https://app.n1.xyz"
 TURNKEY_API = "https://api.turnkey.com"
 TURNKEY_ORG_ID = "497f60f3-57cd-4aec-af39-7415c2fafaab"
-ZERO1_JANUS_LOGIN_PATH = "/api/janus/v1/auth/wallet/login"
-ZERO1_JANUS_CHALLENGE_PATH = "/api/janus/v1/auth/wallet/challenge"
-
-ZERO1_APP = "https://01.xyz"
-N1_SESSION_STAMP_PREFIX = "N1-SESSION-STAMP-V1"
-N1_AUTH_IDENTIFY_PATH = "/v1/auth/identify"
-N1_AUTH_IDENTIFY_BODY = "{}"
 _POINTS_GENESIS = datetime(2026, 2, 3, tzinfo=UTC)  # week 1 start (Tuesday)
-
-# last know values. can be changed on next deployment, but code have auto-discovery fallback
-AUTH_ACT = "404455b12249fd9ec1aea6c44bf40eb0338e7cd9a2"
-NEXT_DPL = "dpl_BnNc2gSJ2i8QQPVgf45a7rCAsAmA"
-
-_POINTS_META_LOCK = asyncio.Lock()
-_POINTS_META_CACHE = ".cache/zero1_points_meta.json"
-
-
-async def _get_points_meta(
-    http: AsyncHttp, fresh: bool = False, stale_act: str | None = None
-) -> tuple[str, str]:
-    """Returns (action_hash, deployment_id). Pure — no side effects."""
-    if not fresh:
-        d = utils.json_load(_POINTS_META_CACHE)
-        if d:
-            return d["act"], d["dpl"]
-        return AUTH_ACT, NEXT_DPL
-
-    async with _POINTS_META_LOCK:
-        # double-check: another client may have already refreshed while we waited on the lock
-        d = utils.json_load(_POINTS_META_CACHE)
-        if d and d.get("act") != stale_act:
-            return d["act"], d["dpl"]
-
-        # discover: RSC fetch → chunk scan → find createToken action hash
-        rsc_hdr = {
-            "RSC": "1",
-            "Next-Router-State-Tree": "%5B%22%22%2C%7B%7D%2Cnull%2Cnull%2Ctrue%5D",
-        }
-        rsc = await http.request("GET", f"{ZERO1_APP}/points", headers=rsc_hdr)
-        html = await http.request("GET", f"{ZERO1_APP}/points")
-        dpl_re = r"dpl=(dpl_[A-Za-z0-9]+)"
-        dpl_mm = re.search(dpl_re, rsc.text) or re.search(dpl_re, html.text)
-        dpl = dpl_mm.group(1) if dpl_mm else NEXT_DPL
-        combined = rsc.text + html.text
-        chunks = list(dict.fromkeys(re.findall(r'"(/_next/static/chunks/[^"?]+\.js)', combined)))
-        for c in chunks:
-            r = await http.request("GET", f"{ZERO1_APP}{c}?dpl={dpl}")
-            m = re.search(
-                r'createServerReference\)\("([0-9a-f]{40,42})"[^"]*"createToken"\)', r.text
-            )
-            if m:
-                act = m.group(1)
-                utils.json_dump(_POINTS_META_CACHE, {"act": act, "dpl": dpl})
-                return act, dpl
-
-        logger.warning("Points meta discovery failed, using fallback")
-        return AUTH_ACT, NEXT_DPL
-
 
 # MARK: Protobuf codec (minimal, hand-rolled for Nord actions)
 
@@ -204,7 +144,7 @@ def _parse_place_result(data: bytes) -> dict:
 # MARK: Turnkey
 
 
-class ZeroOneTurnkey:
+class N1Turnkey:
     def __init__(self, privkey: str, proxy: str | None = None):
         raw = bytes.fromhex(privkey.removeprefix("0x").zfill(64))
         self._evm_account: LocalAccount = Account.from_key(raw)
@@ -220,10 +160,9 @@ class ZeroOneTurnkey:
             .hex()
         )
         self._sub_org_id: str | None = None
-        self._session_token: str | None = None
 
-        headers = {"Referer": f"{ZERO1_APP}/", "Origin": ZERO1_APP}
-        self._janus = AsyncHttp(baseurl=ZERO1_APP, headers=headers, proxy=proxy)
+        headers = {"Referer": f"{N1_APP}/", "Origin": N1_APP}
+        self._n1_api = AsyncHttp(baseurl=N1_API, headers=headers, proxy=proxy)
         self._api = AsyncHttp(baseurl=TURNKEY_API, headers=headers, proxy=proxy)
 
     def _stamp_eip191(self, body: str) -> str:
@@ -277,27 +216,27 @@ class ZeroOneTurnkey:
 
     @ttl_cache(86400)
     async def login(self) -> str:
-        """Authenticate via EVM key → Turnkey (via Janus proxy) → returns Solana address."""
+        """Authenticate via EVM key and N1 API, then return the Turnkey Solana address."""
         challenge_payload = {
             "sessionPublicKey": self._ephem_pubkey_hex,
             "walletAddress": self._evm_account.address.lower(),
             "network": "ethereum",
         }
-        challenge_rep = await self._janus.request(
-            "POST", ZERO1_JANUS_CHALLENGE_PATH, json=challenge_payload
+        challenge_rep = await self._n1_api.request(
+            "POST", "/v1/auth/wallet/challenge", json=challenge_payload
         )
         if not challenge_rep.ok:
-            raise ApiError("Turnkey wallet challenge via Janus failed", challenge_rep)
+            raise ApiError("N1 wallet challenge failed", challenge_rep)
 
         challenge = challenge_rep.json().get("data")
         if not isinstance(challenge, dict) or not challenge.get("challengeId"):
-            raise ApiError("Turnkey wallet challenge via Janus returned invalid data")
+            raise ApiError("N1 wallet challenge returned invalid data")
 
         body = json.dumps(
             {
                 "parameters": {
                     "publicKey": self._ephem_pubkey_hex,
-                    "expirationSeconds": "1209600",
+                    "expirationSeconds": "604800",
                     "invalidateExisting": True,
                 },
                 "organizationId": TURNKEY_ORG_ID,
@@ -319,13 +258,12 @@ class ZeroOneTurnkey:
                 "nonce": challenge["nonce"],
             },
         }
-        rep = await self._janus.request("POST", ZERO1_JANUS_LOGIN_PATH, json=payload)
+        rep = await self._n1_api.request("POST", "/v1/auth/wallet/login", json=payload)
         if not rep.ok:
-            raise ApiError("Turnkey stamp_login via Janus failed", rep)
+            raise ApiError("N1 wallet login failed", rep)
 
         rep_data = rep.json()["data"]
         session_token = rep_data["session"]["sessionToken"]
-        self._session_token = session_token
         user = rep_data.get("identifyData", {}).get("user", {})
         self._sub_org_id = user.get("turnkeySuborgId") or self._jwt_org_id(session_token)
 
@@ -341,33 +279,6 @@ class ZeroOneTurnkey:
             if acc.get("curve") == "CURVE_ED25519":
                 return acc["address"]
         raise ApiError("Turnkey Ed25519 wallet not found")
-
-    async def n1_auth_headers(self) -> dict[str, str]:
-        """Build N1 session-proof headers for authenticated 01.xyz API routes."""
-        await self.login()
-        assert self._session_token is not None
-
-        timestamp_ms = str(int(time.time() * 1000))
-        nonce = str(uuid.uuid4())
-        body_hash = hashlib.sha256(N1_AUTH_IDENTIFY_BODY.encode()).hexdigest()
-        proof = "\n".join(
-            [
-                N1_SESSION_STAMP_PREFIX,
-                "POST",
-                N1_AUTH_IDENTIFY_PATH,
-                body_hash,
-                timestamp_ms,
-                nonce,
-            ]
-        )
-
-        return {
-            "Authorization": f"Bearer {self._session_token}",
-            "Content-Type": "application/json",
-            "X-N1-Session-Stamp": self._stamp_p256(proof.encode()),
-            "X-N1-Session-Timestamp": timestamp_ms,
-            "X-N1-Session-Nonce": nonce,
-        }
 
     async def sign_payload(self, payload_hex: str) -> bytes:
         """Sign Nord action payload (hex string) via Turnkey managed Ed25519 key."""
@@ -393,18 +304,19 @@ class ZeroOneTurnkey:
 # MARK: Client
 
 
-class ZeroOnePoint(BaseModel):
+class N1Point(BaseModel):
+    stage: str
     start_window: datetime
     points: Decimal
 
 
 @bind_log_context
-class ZeroOneClient:
-    exchange = "zero1"
+class N1Client:
+    exchange = "n1"
 
     @classmethod
     def __type_check(cls) -> type[TradingClient]:
-        return ZeroOneClient
+        return N1Client
 
     @classmethod
     def to_week_label(cls, dt: datetime) -> str:
@@ -417,7 +329,7 @@ class ZeroOneClient:
     def __init__(self, name: str, privkey: str, proxy: str | None = None):
         self.name = name
         self.address = utils.parse_eth_key(privkey, name).address
-        self._turnkey = ZeroOneTurnkey(privkey, proxy)
+        self._turnkey = N1Turnkey(privkey, proxy)
         self._session_key = Ed25519PrivateKey.generate()
         self._session_pubkey = self._session_key.public_key().public_bytes_raw()
         self._session_id: int | None = None
@@ -425,9 +337,14 @@ class ZeroOneClient:
         self._login_lock = asyncio.Lock()
         self.http = AsyncHttp(
             baseurl=NORD_API,
-            headers={"Referer": f"{ZERO1_APP}/", "Origin": ZERO1_APP},
+            headers={"Referer": f"{N1_APP}/", "Origin": N1_APP},
             proxy=proxy,
-            cookies_file=f".cache/zero1_{utils.short_addr(self.address)}_http.pkl",
+            cookies_file=f".cache/n1_{utils.short_addr(self.address)}_http.pkl",
+        )
+        self._n1 = AsyncHttp(
+            baseurl=N1_API,
+            headers={"Referer": f"{N1_APP}/", "Origin": N1_APP},
+            proxy=proxy,
         )
 
     async def _call(self, method: HttpMethod, path: str, **kwargs):
@@ -437,6 +354,18 @@ class ZeroOneClient:
         if not rep.ok:
             raise ApiError("API error", rep)
         return rep.json()
+
+    async def _n1_call(self, path: str, **kwargs) -> dict:
+        rep = await self._n1.request("GET", path, **kwargs)
+        if not rep.ok:
+            raise ApiError("N1 app API error", rep)
+        try:
+            data = rep.json()
+        except ValueError as e:
+            raise ApiError("N1 app API returned invalid JSON", rep) from e
+        if not isinstance(data, dict):
+            raise ApiError(f"N1 app API returned {type(data).__name__}, expected object")
+        return data
 
     # MARK: Auth
 
@@ -450,7 +379,9 @@ class ZeroOneClient:
         data = await self._call("GET", f"/user/{solana_addr}")
         if not data.get("accountIds"):
             addr = utils.short_addr(solana_addr)
-            raise ApiError(f"Nord account not found for {addr} — connect wallet on 01.xyz first")
+            raise ApiError(
+                f"Nord account not found for {addr} — connect wallet on app.n1.xyz first"
+            )
         account_ids = data["accountIds"]
         self._account_id = account_ids[0]
 
@@ -576,13 +507,16 @@ class ZeroOneClient:
     async def paged(self, path: str, since: datetime | None = None) -> list[dict]:
         page_size = 255
         records: list[dict] = []
-        cursor: str | None = None
+        cursor: str | int | None = None
+        seen_cursors: set[str | int] = set()
 
         while True:
-            params = {"pageSize": str(page_size)}
-            if since and not cursor:
+            params: dict[str, str | int] = {"pageSize": str(page_size)}
+            if path.startswith("/trades?"):
+                params["paginationMode"] = "actionId"
+            if since and cursor is None:
                 params["since"] = since.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-            if cursor:
+            if cursor is not None:
                 params["startInclusive"] = cursor
 
             rep = await self.http.request("GET", path, params=params)
@@ -593,9 +527,13 @@ class ZeroOneClient:
             data = rep.json()
             batch = data.get("items", [])
             records.extend(batch)
-            cursor = data.get("nextStartInclusive")
-            if not cursor or len(batch) < page_size:
+            next_cursor = data.get("nextStartInclusive")
+            if next_cursor is None:
                 break
+            if next_cursor in seen_cursors:
+                raise ApiError(f"Pagination cursor did not advance for {path}")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
         fields = ["actionId", "marketId", "tradeId", "orderId", "time"]
         for r in records:
@@ -621,16 +559,21 @@ class ZeroOneClient:
     async def get_fee_rates(self) -> tuple[Decimal, Decimal]:
         _, acc_id = await self._ensure_session()
         try:
-            tr, mr = await asyncio.gather(
-                self._call("GET", f"/market/0/fees/taker/{acc_id}"),
-                self._call("GET", f"/market/0/fees/maker/{acc_id}"),
+            tier, brackets = await asyncio.gather(
+                self._call("GET", f"/account/{acc_id}/fee/tier"),
+                self._call("GET", "/fee/brackets/info"),
             )
-            return Decimal(str(tr)), Decimal(str(mr))
+            fees = dict(brackets)[tier]
+            scale = Decimal(1_000_000)
+            return (
+                Decimal(str(fees["taker_fee_ppm"])) / scale,
+                Decimal(str(fees["maker_fee_ppm"])) / scale,
+            )
         except Exception:
             return Decimal("0.00035"), Decimal("0.0001")
 
     async def get_leverage(self, symbol: str) -> int | None:
-        return None  # Nord uses risk-based margin; leverage on 01.xyz is frontend-only
+        return None  # Nord uses risk-based margin; leverage in N1 is frontend-only
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         pass
@@ -838,84 +781,68 @@ class ZeroOneClient:
 
     # MARK: Profile
 
-    @ttl_cache(86400)
-    async def _ensure_points_auth(self, solana_addr: str, acc_id: int) -> None:
-        await ensure_unwaf(self.http, f"{ZERO1_APP}/")
+    async def _fetch_points(self, solana_addr: str) -> dict:
+        return await self._n1_call("/v1/app/points", params={"address": solana_addr})
 
-        # NOTE: When auto-discovery breaks, do this manually:
-        # 1. Open DevTools > Application > "Clear site data" > Reload page
-        # 2. Login, filter network: "has-response-header:set-cookie domain:01.xyz"
-        # 3. Copy header values into AUTH_ACT / NEXT_DPL above, delete _POINTS_META_CACHE
-
-        act, dpl = await _get_points_meta(self.http)
-        pld = {"address": solana_addr, "accountId": acc_id, "network": "mainnet", "sessionId": None}
-        hdr = {"next-action": act, "x-deployment-id": dpl}
-        rep = await self.http.request("POST", f"{ZERO1_APP}/points", json=[pld], headers=hdr)
-
-        if rep.status_code == 404 and rep.headers.get("x-nextjs-action-not-found"):
-            act, dpl = await _get_points_meta(self.http, fresh=True, stale_act=act)
-            hdr = {"next-action": act, "x-deployment-id": dpl}
-            rep = await self.http.request("POST", f"{ZERO1_APP}/points", json=[pld], headers=hdr)
-
-        cname = f"01session_{solana_addr}_mainnet"
-        if cname not in self.http.session.cookies:
-            logger.warning(f"Points auth cookie not found ({rep.status_code})")
-
-    async def _fetch_points(self, solana_addr: str, acc_id: int) -> dict:
-        await ensure_unwaf(self.http, f"{ZERO1_APP}/")
-        headers = await self._turnkey.n1_auth_headers()
-        headers["Referer"] = f"{ZERO1_APP}/points"
-
-        url = f"{ZERO1_APP}/api/points?walletAddress={solana_addr}"
-        rep = await self.http.request("GET", url, headers=headers)
-        if rep.status_code != 200:
-            logger.warning(f"Failed to fetch points: {rep.status_code} {rep.text}")
-
-        return rep.json()
-
-    async def _points(self, solana_addr: str, acc_id: int) -> tuple[Decimal, int | None]:
-        data = await self._fetch_points(solana_addr, acc_id)
-        lb = data.get("leaderboardData", {}) or {}
+    async def _points(self, solana_addr: str) -> tuple[Decimal, int | None]:
+        data = await self._fetch_points(solana_addr)
+        records = data.get("data", [])
         points = sum(
-            (Decimal(str(d.get("points", 0))) for d in data.get("data", [])),
+            (Decimal(str(d.get("points", 0))) for d in records),
             Decimal(0),
         )
-        if not points:
-            points = Decimal(str(lb.get("points", 0)))
-        return points, lb.get("rank")
+        current = next((d for d in records if d.get("isCurrent")), {})
+        return points, current.get("rank")
 
-    async def points_history(self) -> list[ZeroOnePoint]:
-        _, acc_id = await self._ensure_session()
+    async def points_history(self) -> list[N1Point]:
         solana_addr = await self._turnkey.login()
-        data = await self._fetch_points(solana_addr, acc_id)
+        data = await self._fetch_points(solana_addr)
         result = []
         for d in data.get("data", []):
             stage = d["stage"]
-            n = 0 if stage == "referral_rewards" else int(stage.split("_")[1])
-            start = _POINTS_GENESIS + timedelta(weeks=n - 1)
-            result.append(ZeroOnePoint(start_window=start, points=Decimal(str(d["points"]))))
+            if stage == "referral_rewards":
+                start = _POINTS_GENESIS - timedelta(weeks=1)
+            elif stage.startswith("week_"):
+                week = stage.removeprefix("week_")
+                if not week.isdigit():
+                    continue
+                start = _POINTS_GENESIS + timedelta(weeks=int(week) - 1)
+            else:
+                continue
+            result.append(
+                N1Point(stage=stage, start_window=start, points=Decimal(str(d["points"])))
+            )
         return result
 
     async def _total_volume(self, acc_id: int) -> Decimal:
-        pld = {"accountId": acc_id, "since": "2020-01-01T00:00:00Z"}
-        res = await self._call("GET", "/account/volume", params=pld)
-        return sum((Decimal(str(e.get("volumeQuote", 0))) for e in res), Decimal(0))
+        data = await self._n1_call(
+            "/v1/app/analytics/accounts/lifetime-volume",
+            params={"accountIds": str(acc_id)},
+        )
+        return Decimal(str(data["data"]["lifetimeVolumeUsd"]))
 
     async def _total_pnl(self, acc_id: int) -> Decimal:
-        pnl_data, vol_data = await asyncio.gather(
-            self._call("GET", f"{ZERO1_APP}/api/calendar/{acc_id}"),
-            self._call("GET", f"{ZERO1_APP}/api/volume-calendar/{acc_id}"),
+        data = await self._n1_call(
+            "/v1/app/analytics/account-overview",
+            params={
+                "accountId": str(acc_id),
+                "include": "summary",
+                "pnlLimit": "0",
+                "positionSnapshotsLimit": "0",
+                "positionSnapshotsPositionsMode": "summary",
+                "dailyLimit": "0",
+                "closedTradesLimit": "0",
+                "marketVolumeLimit": "0",
+            },
         )
-        pnl_days = pnl_data.get("days", {})
-        fee_days = vol_data.get("days", {})
-        all_days = set(pnl_days) | set(fee_days)
-        total = Decimal(0)
-        for day in all_days:
-            d = pnl_days.get(day, {})
-            total += Decimal(str(d.get("tradingPnl", 0)))
-            total += Decimal(str(d.get("fundingPnl", 0)))
-            total -= Decimal(str(fee_days.get(day, {}).get("totalFees", 0)))
-        return total
+        return Decimal(str(data["summary"]["snapshot"]["totalPnl"]))
+
+    async def daily_pnl(self, acc_id: int) -> list[dict]:
+        data = await self._n1_call(
+            "/v1/app/analytics/daily-pnl",
+            params={"accountId": str(acc_id), "limit": "730"},
+        )
+        return data.get("items", [])
 
     async def profile(self) -> ProfileInfo:
         _, acc_id = await self._ensure_session()
@@ -924,7 +851,7 @@ class ZeroOneClient:
             self._call("GET", f"/account/{acc_id}"),
             self._total_volume(acc_id),
             self._total_pnl(acc_id),
-            self._points(solana_addr, acc_id),
+            self._points(solana_addr),
         )
         bal = Decimal(0)
         for b in account.get("balances", []):

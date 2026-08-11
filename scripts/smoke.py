@@ -240,7 +240,7 @@ async def main():
         "onyx",
         "pacifica",
         "rise",
-        "zero1",
+        "n1",
     ]
     parser.add_argument("exchange", choices=exchanges)
     parser.add_argument("symbol", help="Symbol to test (must NOT be in config symbols)")
@@ -265,12 +265,12 @@ async def main():
     from apps.hyperliquid import HyperLiquidNativeClient
     from clients.ethereal import EtherealClient
     from clients.hyena import HyenaClient
+    from clients.n1 import N1Client
     from clients.nado import NadoClient
     from clients.omni import OmniClient
     from clients.onyx import OnyxClient
     from clients.pacifica import PacificaClient
     from clients.rise import RiseClient
-    from clients.zero1 import ZeroOneClient
     from strategy import StrategyConfig
 
     CLIENT_MAP = {
@@ -282,7 +282,7 @@ async def main():
         "onyx": OnyxClient,
         "pacifica": PacificaClient,
         "rise": RiseClient,
-        "zero1": ZeroOneClient,
+        "n1": N1Client,
     }
     if args.exchange not in CLIENT_MAP:
         parser.error(f"unsupported exchange '{args.exchange}'")
