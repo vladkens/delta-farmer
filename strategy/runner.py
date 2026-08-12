@@ -26,8 +26,6 @@ def _env_enabled(name: str) -> bool:
 
 
 async def print_positions(accs: Sequence[TradingClient]) -> None:
-    await asyncio.gather(*[a.warmup() for a in accs], return_exceptions=True)
-
     all_pos, all_bal = await asyncio.gather(
         asyncio.gather(*[a.positions() for a in accs], return_exceptions=True),
         asyncio.gather(*[a.balance() for a in accs], return_exceptions=True),
@@ -144,9 +142,8 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
 
 
 async def close_all(clients: Sequence[TradingClient]) -> None:
-    """Warmup, cancel all orders, and close all positions. Used by the CLI close command."""
+    """Cancel all orders and close all positions. Used by the CLI close command."""
     for client in clients:
-        await client.warmup()
         count1 = await client.cancel_all_orders()
         count2 = await client.close_all_positions()
         logger.info(f"{client.name}: Canceled {count1} orders, closed {count2} positions")
@@ -155,12 +152,7 @@ async def close_all(clients: Sequence[TradingClient]) -> None:
 # MARK: Groups
 
 
-async def _warmup_all(accs: Sequence[TradingClient]) -> None:
-    rs = await asyncio.gather(*[a.warmup() for a in accs], return_exceptions=True)
-    failed = [a.name for a, r in zip(accs, rs) if isinstance(r, Exception)]
-    if failed:
-        raise AppError(f"Warmup failed: {', '.join(failed)}")
-
+async def _check_accounts(accs: Sequence[TradingClient]) -> None:
     rs = await asyncio.gather(*[a.registered() for a in accs], return_exceptions=True)
     failed = [a.name for a, r in zip(accs, rs) if isinstance(r, Exception) or r is False]
     if failed:
@@ -228,7 +220,7 @@ async def _balance_sorted(accs: Sequence[TradingClient]) -> list[TradingClient]:
 
 async def run_groups(cfg: StrategyConfig, accs: Sequence[TradingClient]) -> None:
     cfg, accs = _check_cfg(cfg, accs)
-    await _warmup_all(accs)
+    await _check_accounts(accs)
     await _check_symbols(cfg, accs)
 
     tg.start()

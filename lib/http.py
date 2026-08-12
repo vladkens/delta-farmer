@@ -101,9 +101,22 @@ class AsyncHttp:
         pickle_dump(self.cookies_file, new_jar, lock=True)
         self._cookies_hash = new_hash
 
+    def load_cookies(self) -> None:
+        if self._cookies_loaded:
+            return
+
+        self._load_cookies()
+        self._cookies_loaded = True
+
     async def close(self) -> None:
         self._save_cookies()
         await self.session.close()
+
+    def clear_cookies(self) -> None:
+        self.session.cookies.clear()
+        self._cookies_loaded = True
+        self._cookies_hash = None
+        self._save_cookies()
 
     def _build_url(self, url: str) -> str:
         if url.startswith(("http://", "https://")):
@@ -112,9 +125,7 @@ class AsyncHttp:
         return f"{self.baseurl.rstrip('/')}/{url.lstrip('/')}"
 
     async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
-        if not self._cookies_loaded:
-            self._load_cookies()
-            self._cookies_loaded = True
+        self.load_cookies()
 
         fullurl = self._build_url(url)
         logname = f"Http {method} {url.split('?')[0]}"

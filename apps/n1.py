@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TypeVar
 
 from clients.n1 import N1Client, N1Point
-from lib.cli import create_cli, run_app
+from lib.cli import create_cli, create_clients, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -80,7 +80,6 @@ async def print_info(accs: list[N1Client]):
     )
 
     async def row(acc: N1Client):
-        await acc.warmup()
         p = await acc.profile() if await acc.registered() else None
         a = short_addr(acc.address)
         if not p:
@@ -153,8 +152,7 @@ async def main():
     cli = await create_cli("n1", "configs/n1.toml", ["privkey"])
     cfg = StrategyConfig.load(cli.config)
 
-    accs = [(N1Client.from_config(x), x.enabled) for x in cfg.accounts]
-    all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]
+    all_accs, act_accs = await create_clients(cli, cfg.accounts, N1Client.from_config)
 
     match cli.command:
         case "info":

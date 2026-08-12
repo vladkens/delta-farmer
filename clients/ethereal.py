@@ -168,9 +168,8 @@ class EtherealClient:
 
     # MARK: Lifecycle
 
-    @retry(max_attempts=9, delay=2.0)
-    async def warmup(self) -> None:
-        pass  # no warmup required for ethereal
+    async def login(self, *, force: bool = False) -> None:
+        return self.http.clear_cookies() if force else None
 
     async def registered(self) -> bool:
         res = await self._call("GET", "/subaccount", params={"sender": self.address})

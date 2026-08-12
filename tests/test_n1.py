@@ -178,6 +178,60 @@ async def test_fee_rates_use_current_tier_endpoints(client):
     ]
 
 
+async def test_force_login_replaces_nord_session(client):
+    old_key = Mock()
+    client._session_key = old_key
+    client._session_pubkey = b"old"
+    client._session_id = 1
+    client._account_id = 2
+
+    async def establish_session():
+        assert client._session_id is None
+        assert client._account_id is None
+        client._session_id = 3
+        client._account_id = 4
+
+    client._login = AsyncMock(side_effect=establish_session)
+
+    await client.login(force=True)
+
+    client.http.clear_cookies.assert_called_once_with()
+    client._n1.clear_cookies.assert_called_once_with()
+    assert client._session_key is not old_key
+    assert client._session_pubkey != b"old"
+    assert (client._session_id, client._account_id) == (3, 4)
+    client._login.assert_awaited_once_with()
+
+
+async def test_login_reuses_nord_session(client):
+    client._session_id = 1
+    client._account_id = 2
+    client._login = AsyncMock()
+
+    await client.login()
+
+    client._login.assert_not_awaited()
+    client.http.clear_cookies.assert_not_called()
+    client._n1.clear_cookies.assert_not_called()
+
+
+async def test_login_creates_missing_nord_session(client):
+    client._session_id = None
+    client._account_id = None
+
+    async def establish_session():
+        client._session_id = 1
+        client._account_id = 2
+
+    client._login = AsyncMock(side_effect=establish_session)
+
+    await client.login()
+
+    client._login.assert_awaited_once_with()
+    client.http.clear_cookies.assert_not_called()
+    client._n1.clear_cookies.assert_not_called()
+
+
 async def test_stats_use_net_daily_pnl_without_subtracting_fees(monkeypatch):
     acc = Mock(name="test")
     acc.name = "test"

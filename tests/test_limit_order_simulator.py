@@ -59,7 +59,7 @@ class ScriptedBookClient(TradingClient):
     def name(self) -> str:
         return self._name
 
-    async def warmup(self) -> None:
+    async def login(self, *, force: bool = False) -> None:
         return None
 
     async def balance(self) -> Decimal:

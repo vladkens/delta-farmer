@@ -162,6 +162,8 @@ uv run apps/<app>.py trade          # Запустить автоматичес�
 uv run apps/<app>.py close          # Закрыть все открытые позиции
 uv run apps/<app>.py info           # Показать балансы аккаунтов и points
 uv run apps/<app>.py positions      # Показать текущие открытые позиции
+uv run apps/<app>.py login          # Проверить и восстановить логины всех аккаунтов
+uv run apps/<app>.py login --force  # Принудительно перелогинить все аккаунты
 uv run apps/<app>.py proxy          # Проверить настроенные proxies
 
 # Statistics
@@ -221,6 +223,10 @@ uv run apps/onyx.py migrate                  # Перевести Onyx HyperLiqu
 ```
 
 Команды Omni competition показывают активное окно турнира, статус участия, eligibility volume и места в leaderboard. Команды Hyena и Onyx `migrate` переводят HyperLiquid-backed аккаунты в Unified Account mode, если exchange сообщает legacy account mode.
+
+### Проблемы со входом в Omni
+
+Некоторые пользователи сообщают о проблемах со входом в Omni. В качестве workaround запустите `uv run apps/omni.py login`: команда последовательно повторяет вход каждые 30 секунд до успеха. Для свежего входа используйте `login --force`; если проблема остаётся, смените proxy.
 
 ---
 

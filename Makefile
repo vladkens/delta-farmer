@@ -1,8 +1,4 @@
-.PHONY: prepare check update update-dev clean deploy logs foreach info proxy stats-was stats-now
-
-FOREACH_CLT := $(filter-out hyperliquid vault,$(basename $(notdir $(wildcard apps/*.py))))
-FOREACH_CMD := $(strip $(cmd) $(if $(filter all,$(p)),,$(p)))
-FOREACH_RUN = echo "\n── $(1) ──" && uv run -m apps.$(1) $(FOREACH_CMD) --no-banner || true
+.PHONY: prepare check update update-dev clean
 
 prepare:
 	uv run ruff format .
@@ -35,6 +31,12 @@ clean:
 
 # --- Foreach ---
 
+.PHONY: foreach info proxy stats-was stats-now
+
+FOREACH_CLT := $(filter-out hyperliquid vault,$(basename $(notdir $(wildcard apps/*.py))))
+FOREACH_CMD := $(strip $(cmd) $(if $(filter all,$(p)),,$(p)))
+FOREACH_RUN = echo "\n── $(1) ──" && uv run -m apps.$(1) $(FOREACH_CMD) --no-banner || { code=$$?; [ $$code -eq 130 ] && exit $$code; true; }
+
 foreach:
 	@if [ -z "$(FOREACH_CMD)" ]; then \
 		echo 'usage: make foreach cmd="<command> [args...]" [p=last|this]'; \
@@ -45,16 +47,21 @@ foreach:
 info:
 	@$(MAKE) -s foreach cmd="info"
 
-proxy:
-	@$(MAKE) -s foreach cmd="proxy"
-
 stats-was:
 	@$(MAKE) -s foreach cmd="stats last"
 
 stats-now:
 	@$(MAKE) -s foreach cmd="stats this"
 
+proxy:
+	@$(MAKE) -s foreach cmd="proxy"
+
+login:
+	@$(MAKE) -s foreach cmd="login"
+
 # --- Deploy ---
+
+.PHONY: deploy logs
 
 HOST=lab
 EXEC=ssh -tt $(HOST)

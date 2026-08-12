@@ -8,7 +8,7 @@ from typing import TypeVar
 
 from clients.hyperliquid import migrate_hyperliquid_accounts, warn_legacy_hyperliquid_accounts
 from clients.onyx import OnyxClient, OnyxPoint
-from lib.cli import create_cli, run_app
+from lib.cli import create_cli, create_clients, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -65,7 +65,6 @@ async def print_info(accs: list[OnyxClient], force: bool = False):
     legacy_accounts: list[str] = []
 
     async def row(acc: OnyxClient):
-        await acc.warmup()
         if not await acc.registered():
             a = short_addr(acc.address)
             vol_rows.append((Decimal(0), Decimal(0)))
@@ -148,8 +147,7 @@ async def main():
     )
     cfg = StrategyConfig.load(cli.config)
 
-    accs = [(OnyxClient.from_config(x), x.enabled) for x in cfg.accounts]
-    all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]
+    all_accs, act_accs = await create_clients(cli, cfg.accounts, OnyxClient.from_config)
     for c in act_accs:
         c._symbols = cfg.symbols
 

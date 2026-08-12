@@ -34,10 +34,10 @@ async def smoke(client: TradingClient, symbol: str, size_usd: float) -> tuple[in
     # MARK: Lifecycle
 
     try:
-        await client.warmup()
-        report("warmup", True)
+        await client.login()
+        report("login", True)
     except Exception as e:
-        report("warmup", False, str(e))
+        report("login", False, str(e))
         return passed, failed  # can't continue without auth
 
     # MARK: Read-only checks

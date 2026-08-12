@@ -10,7 +10,7 @@ from eth_account.messages import encode_defunct
 from pydantic import AliasPath, BaseModel, ConfigDict, Field
 
 from lib import utils
-from lib.decorators import bind_log_context, retry, ttl_cache
+from lib.decorators import bind_log_context, locked, retry, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -165,13 +165,12 @@ class OmniClient:
                 return rep
         return await self.http.request(method, url, **kwargs)
 
-    @retry(max_attempts=3, delay=2.0)  # bypass cloudflare
-    async def warmup(self) -> None:
+    async def _prepare_login(self) -> None:
         rep = await self._request("GET", f"{APP_URL}/portfolio?tab=positions")  # app access
-        assert rep.ok, f"Warmup failed: {rep.status_code} {rep.text[:200]}"
+        assert rep.ok, f"Login preparation failed: {rep.status_code} {rep.text[:200]}"
 
         rep = await self._request("GET", "/banner")  # api access
-        assert rep.ok, f"Warmup failed: {rep.status_code} {rep.text[:200]}"
+        assert rep.ok, f"Login preparation failed: {rep.status_code} {rep.text[:200]}"
 
     @retry(max_attempts=3, delay=2.0)  # bypass cloudflare
     async def registered(self) -> bool:
@@ -180,10 +179,8 @@ class OmniClient:
         res = rep.json()
         return res["settlement_pool"] is not None
 
-    @retry(max_attempts=3, delay=1.0)
-    async def _ensure_auth(self):
-        if "vr-token" in self.http.session.cookies:
-            return True
+    async def _login(self) -> None:
+        await self._prepare_login()
         pld = {"address": self.address}
         rep = await self._request("POST", "/auth/generate_signing_data", json=pld)
         if not rep.text.startswith("omni.variational.io wants you to"):
@@ -196,11 +193,39 @@ class OmniClient:
         rep = await self._request("POST", "/auth/login", json=pld)
         if not rep.ok or "vr-token" not in self.http.session.cookies:
             raise ApiError("Login failed", rep)
+
+    def _clear_auth(self) -> None:
+        self.http.session.cookies.pop("vr-token", None)
+
+    async def _check_auth(self) -> bool:
+        self.http.load_cookies()
+        if "vr-token" not in self.http.session.cookies:
+            return False
+        rep = await self._request("GET", "/portfolio?compute_margin=true")
+        if rep.status_code == 401:
+            return False
+        if not rep.ok:
+            raise ApiError("Auth check failed", rep)
         return True
 
+    @locked
+    async def login(self, *, force: bool = False) -> None:
+        self.http.clear_cookies() if force else None
+        if force or not await self._check_auth():
+            self._clear_auth()
+            await self._login()
+
     async def _call(self, method: HttpMethod, path: str, **kwargs):
-        await self._ensure_auth()
+        self.http.load_cookies()
+        if "vr-token" not in self.http.session.cookies:
+            await self.login()
+        rejected_token = self.http.session.cookies.get("vr-token")
         rep = await self._request(method, path, **kwargs)
+        if rep.status_code == 401:
+            if self.http.session.cookies.get("vr-token") == rejected_token:
+                self._clear_auth()
+            await self.login()
+            rep = await self._request(method, path, **kwargs)
         if not rep.ok:
             raise ApiError("API error", rep)
         return rep.json()
@@ -504,10 +529,10 @@ class OmniClient:
         res = await self._call("GET", "/points/summary")
         return PointsInfo(**res) if res else PointsInfo(total_points=Decimal(0))
 
-    async def total_volume(self):
-        res = await self._call("GET", "/referrals/summary")
+    async def total_volume(self) -> tuple[Decimal, str | None]:
+        res = await self._call("GET", "/referrals/summary") or {}
         vol = _volume_field_total(res.get("own_volume") or res.get("trade_volume"))
-        ref: str | None = res.get("referred_by", {}).get("code") or None
+        ref: str | None = (res.get("referred_by") or {}).get("code") or None
         return vol, ref
 
     async def leaderboard_self(self) -> OmniLeaderboardSelf:

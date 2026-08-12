@@ -239,8 +239,8 @@ class HyperLiquidClient:
 
     # MARK: Lifecycle
 
-    async def warmup(self) -> None:
-        pass
+    async def login(self, *, force: bool = False) -> None:
+        return self.http.clear_cookies() if force else None
 
     async def registered(self) -> bool:
         rep = await self._info(type="legalCheck", user=self.address)

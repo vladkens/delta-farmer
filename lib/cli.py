@@ -7,9 +7,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
-from collections.abc import Callable, Coroutine
-from typing import Any
+from collections.abc import Callable, Coroutine, Sequence
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +23,16 @@ from .models import AccountConfig
 from .proxy import print_proxies
 from .telegram import TgConfig
 from .update import latest_release_notice
+
+
+class LoginClient(Protocol):
+    name: str
+
+    async def login(self, *, force: bool = False) -> None: ...
+
+
+LOGIN_RETRY_DELAY = 30
+LOGIN_PROXY_WARNING_ATTEMPTS = 3
 
 
 def eprint(*args, **kwargs):
@@ -147,6 +158,42 @@ async def _handle_tgtest(name: str) -> None:
     eprint("Message sent.")
 
 
+async def _handle_login(clients: Sequence[LoginClient], *, force: bool) -> None:
+    pending = [(client, 0.0, 0) for client in clients]
+    while pending:
+        client, retry_at, failures = pending.pop(0)
+        if wait := max(0.0, retry_at - time.monotonic()):
+            logger.info(f"Retrying login in {wait:.1f}s: {client.name}")
+            await asyncio.sleep(wait)
+
+        try:
+            await client.login(force=force)
+            logger.success(f"Login ready: {client.name}")
+        except Exception as e:
+            logger.warning(f"Login failed: {client.name}: {e}")
+            failures += 1
+            if failures == LOGIN_PROXY_WARNING_ATTEMPTS:
+                logger.warning(f"Login keeps failing: {client.name}. Try a different proxy.")
+            pending.append((client, time.monotonic() + LOGIN_RETRY_DELAY, failures))
+
+
+async def create_clients[T: LoginClient](
+    args: argparse.Namespace,
+    accounts: list[AccountConfig],
+    factory: Callable[[AccountConfig], T],
+) -> tuple[list[T], list[T]]:
+    """Build account clients and handle common CLI commands that require them."""
+    clients = [(factory(account), account.enabled) for account in accounts]
+    all_clients = [client for client, _enabled in clients]
+    active_clients = [client for client, enabled in clients if enabled]
+
+    if args.command == "login":
+        await _handle_login(all_clients, force=args.force)
+        sys.exit(0)
+
+    return all_clients, active_clients
+
+
 def _load_accounts_config(filepath: str) -> list[AccountConfig]:
     try:
         with open(filepath, "rb") as fp:
@@ -179,6 +226,8 @@ async def create_cli(
     sub.add_parser("close", help="Close all positions")
     sub.add_parser("positions", help="Show active positions")
     sub.add_parser("info", help="Show accounts info")
+    login_parser = sub.add_parser("login", help="Check and restore account logins")
+    login_parser.add_argument("--force", action="store_true", help="Start with a fresh login")
     sub.add_parser("proxy", help="Check configured proxies")
     sub.add_parser("clean", help="Delete cached data")
     sub.add_parser("tgtest", help=argparse.SUPPRESS)

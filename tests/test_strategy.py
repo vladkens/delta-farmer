@@ -108,8 +108,8 @@ class MockClient(TradingClient):
     def _rec(self, name: str) -> None:
         self.calls.append(name)
 
-    async def warmup(self):
-        self._rec("warmup")
+    async def login(self, *, force: bool = False):
+        self._rec("force_login" if force else "login")
 
     async def registered(self):
         return True
@@ -193,6 +193,16 @@ class MockClient(TradingClient):
         if (symbol, reduce_only) in self.tradeable_by_check:
             return self.tradeable_by_check[(symbol, reduce_only)]
         return self.tradeable_symbols.get(symbol, True)
+
+
+async def test_account_check_does_not_eagerly_login():
+    from strategy.runner import _check_accounts
+
+    clients = [MockClient("a"), MockClient("b")]
+
+    await _check_accounts(clients)
+
+    assert [client.calls for client in clients] == [[], []]
 
 
 def test_check_cfg_rejects_symbol_pool_smaller_than_symbols_per_trade():

@@ -11,7 +11,7 @@ from typing import Self
 from pydantic import Field, SecretStr
 
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
-from lib.cli import create_cli, run_app
+from lib.cli import create_cli, create_clients, run_app
 from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -64,7 +64,6 @@ async def print_info(accs: list[OmniClient]):
     )
 
     async def row(acc: OmniClient):
-        await acc.warmup()
         p = await acc.profile() if await acc.registered() else None
         a = short_addr(acc.address)
         if not p:
@@ -203,7 +202,6 @@ def _competition_status_table(rows: list[CompetitionRow]) -> None:
 async def print_competition_status(accs: list[OmniClient]) -> None:
     async def row(acc: OmniClient):
         try:
-            await acc.warmup()
             return acc, await acc.competition_status(), None
         except ApiError as e:
             return acc, None, str(e)
@@ -214,7 +212,6 @@ async def print_competition_status(accs: list[OmniClient]) -> None:
 async def join_competition(accs: list[OmniClient]) -> None:
     async def row(acc: OmniClient):
         try:
-            await acc.warmup()
             status = await acc.competition_status()
             if status.ongoing:
                 await acc.competition_opt_in()
@@ -240,8 +237,7 @@ async def main():
     if key := cfg.captcha_key.get_secret_value():
         os.environ["CAPTCHA_KEY"] = key
 
-    accs = [(OmniClient.from_config(x), x.enabled) for x in cfg.accounts]
-    all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]
+    all_accs, act_accs = await create_clients(cli, cfg.accounts, OmniClient.from_config)
 
     match cli.command:
         case "info":

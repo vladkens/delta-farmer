@@ -243,9 +243,8 @@ class NadoClient:
 
     # MARK: Lifecycle
 
-    @retry(max_attempts=9, delay=2.0)
-    async def warmup(self) -> None:
-        pass
+    async def login(self, *, force: bool = False) -> None:
+        return self.http.clear_cookies() if force else None
 
     async def registered(self) -> bool:
         res = await self._query({"type": "subaccount_info", "subaccount": self.sender})

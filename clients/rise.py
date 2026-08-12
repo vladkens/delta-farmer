@@ -15,7 +15,7 @@ from eth_utils.crypto import keccak
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from lib import utils
-from lib.decorators import bind_log_context, retry, ttl_cache
+from lib.decorators import bind_log_context, locked, retry, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.models import AccountConfig, OptionalDec
 from strategy import (
@@ -398,6 +398,7 @@ class RiseClient:
         return cfg["addresses"]["router"]
 
     async def _permit(self, action_hash: str, ttl_sec: int = 7 * 24 * 3600) -> dict[str, Any]:
+        await self.login()
         nonce_anchor, nonce_bitmap = await self._nonce_slot()
         target = await self._target()
         deadline = int(time.time()) + ttl_sec
@@ -420,15 +421,17 @@ class RiseClient:
 
     # MARK: Lifecycle
 
-    @retry(max_attempts=3, delay=2.0)
-    async def warmup(self) -> None:
-        await self.login()
-
     async def registered(self) -> bool:
         data = await self._call("GET", f"/api/v1/invite/account/{self.address}")
         return bool(data.get("has_access")) and data.get("status") == "ACTIVE"
 
-    async def login(self) -> None:
+    @locked
+    @retry(max_attempts=3, delay=2.0)
+    async def login(self, *, force: bool = False) -> None:
+        if force:
+            self.http.clear_cookies()
+            self.rpc.clear_cookies()
+
         signers = await self._call("GET", "/api/v1/auth/signers", params={"account": self.address})
         for s in signers.get("signers", []):
             if s.get("signer", "").lower() == self.signer_address.lower():

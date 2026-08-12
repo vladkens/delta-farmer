@@ -162,6 +162,8 @@ uv run apps/<app>.py trade          # Start automated trading
 uv run apps/<app>.py close          # Close all open positions
 uv run apps/<app>.py info           # View account balances & points
 uv run apps/<app>.py positions      # View current open positions
+uv run apps/<app>.py login          # Check and restore all account logins
+uv run apps/<app>.py login --force  # Force all accounts to log in again
 uv run apps/<app>.py proxy          # Check configured proxies
 
 # Statistics
@@ -224,6 +226,10 @@ uv run apps/onyx.py migrate                  # Migrate Onyx HyperLiquid accounts
 Omni competition commands check the active tournament window, join status, eligibility volume,
 and leaderboard places. Hyena and Onyx migration commands switch HyperLiquid-backed accounts to
 Unified Account mode when the exchange reports a legacy account mode.
+
+### Omni login issues
+
+Some users report login issues with Omni. As a workaround, run `uv run apps/omni.py login`; it retries accounts sequentially every 30 seconds until they succeed. Use `login --force` for a fresh login, and try another proxy if the problem persists.
 
 ### Omni Cloudflare challenges
 

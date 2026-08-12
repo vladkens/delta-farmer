@@ -26,7 +26,7 @@ from eth_account.signers.local import LocalAccount
 from pydantic import BaseModel
 
 from lib import utils
-from lib.decorators import bind_log_context, ttl_cache
+from lib.decorators import bind_log_context, locked, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod, NotFoundError
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -334,7 +334,6 @@ class N1Client:
         self._session_pubkey = self._session_key.public_key().public_bytes_raw()
         self._session_id: int | None = None
         self._account_id: int | None = None
-        self._login_lock = asyncio.Lock()
         self.http = AsyncHttp(
             baseurl=NORD_API,
             headers={"Referer": f"{N1_APP}/", "Origin": N1_APP},
@@ -404,11 +403,7 @@ class N1Client:
         # logger.info(f"Nord session {self._session_id}, account {self._account_id}")
 
     async def _ensure_session(self) -> tuple[int, int]:
-        if self._session_id is not None and self._account_id is not None:
-            return self._session_id, self._account_id
-        async with self._login_lock:
-            if self._session_id is None:
-                await self._login()
+        await self.login()
         assert self._session_id is not None and self._account_id is not None
         return self._session_id, self._account_id
 
@@ -437,10 +432,18 @@ class N1Client:
             raise ApiError(f"Nord action error code: {receipt['error']}")
         return receipt
 
-    # MARK: Lifecycle
+    @locked
+    async def login(self, *, force: bool = False) -> None:
+        if force:
+            self.http.clear_cookies()
+            self._n1.clear_cookies()
+            self._session_key = Ed25519PrivateKey.generate()
+            self._session_pubkey = self._session_key.public_key().public_bytes_raw()
+            self._session_id = None
+            self._account_id = None
 
-    async def warmup(self) -> None:
-        await self._ensure_session()
+        if self._session_id is None or self._account_id is None:
+            await self._login()
 
     async def registered(self) -> bool:
         try:

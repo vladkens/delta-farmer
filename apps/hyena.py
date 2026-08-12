@@ -10,7 +10,7 @@ from rich.console import Console
 
 from clients.hyena import HyenaClient
 from clients.hyperliquid import migrate_hyperliquid_accounts, warn_legacy_hyperliquid_accounts
-from lib.cli import create_cli, run_app
+from lib.cli import create_cli, create_clients, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
@@ -49,7 +49,6 @@ async def print_info(accs: list[HyenaClient]):
     claimable_rewards: list[tuple[str, Decimal]] = []
 
     async def row(acc: HyenaClient):
-        await acc.warmup()
         if await acc.registered():
             p, total, rewards = await asyncio.gather(
                 acc.profile(), acc.reward_total(), acc.system_rewards()
@@ -200,8 +199,7 @@ async def main():
     cfg = StrategyConfig.load(cli.config)
     cfg.symbols = _normalize_symbols(cfg.symbols)
 
-    accs = [(HyenaClient.from_config(x), x.enabled) for x in cfg.accounts]
-    all_accs, act_accs = [c for c, _ in accs], [c for c, e in accs if e]
+    all_accs, act_accs = await create_clients(cli, cfg.accounts, HyenaClient.from_config)
 
     match cli.command:
         case "info":

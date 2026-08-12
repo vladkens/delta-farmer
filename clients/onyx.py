@@ -12,7 +12,7 @@ from eth_account.messages import encode_defunct
 from pydantic import BaseModel
 
 from lib import utils
-from lib.decorators import bind_log_context, ttl_cache
+from lib.decorators import bind_log_context, locked, ttl_cache
 from lib.http import ApiError, AsyncHttp
 from lib.logger import logger
 from strategy import Position, ProfileInfo, TradingClient
@@ -221,7 +221,6 @@ class OnyxClient(HyperLiquidClient):
         self._privy_http = AsyncHttp(baseurl=PRIVY_API, headers=_PRIVY_HEADERS, proxy=proxy)
         self._arjuna_http = AsyncHttp(baseurl=ARJUNA_API, headers={"origin": ONYX_APP}, proxy=proxy)
         self._jwt: str | None = None
-        self._login_lock = asyncio.Lock()
 
     # MARK: Auth
 
@@ -269,20 +268,40 @@ class OnyxClient(HyperLiquidClient):
         self._jwt = jwt
         return jwt
 
+    def _clear_auth(self) -> None:
+        self._privy_http.clear_cookies()
+        self._arjuna_http.clear_cookies()
+        self._jwt = None
+
+    async def _check_auth(self) -> bool:
+        if not self._jwt:
+            return False
+        rep = await self._arjuna_http.request(
+            "GET", "/me/user", headers={"Authorization": f"Bearer {self._jwt}"}
+        )
+        if rep.status_code == 401:
+            return False
+        if not rep.ok:
+            raise ApiError("Auth check failed", rep)
+        return True
+
+    @locked
+    async def login(self, *, force: bool = False) -> None:
+        if force or not await self._check_auth():
+            self._clear_auth()
+            await self._login()
+
     async def _authed_get(self, path: str, **kwargs) -> dict:
         if not self._jwt:
-            async with self._login_lock:
-                if not self._jwt:
-                    await self._login()
+            await self.login()
         jwt = self._jwt
         rep = await self._arjuna_http.request(
             "GET", path, headers={"Authorization": f"Bearer {jwt}"}, **kwargs
         )
         if rep.status_code == 401:
-            self._jwt = None
-            async with self._login_lock:
-                if not self._jwt:
-                    await self._login()
+            if self._jwt == jwt:
+                self._jwt = None
+            await self.login()
             jwt = self._jwt
             rep = await self._arjuna_http.request(
                 "GET", path, headers={"Authorization": f"Bearer {jwt}"}, **kwargs

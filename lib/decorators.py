@@ -9,6 +9,22 @@ from typing import Protocol
 from .logger import logger
 
 
+def locked(func):
+    """Run at most one call to an async instance method at a time."""
+    lock_attr = f"_{func.__name__}_lock"
+
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        lock = getattr(self, lock_attr, None)
+        if lock is None:
+            lock = asyncio.Lock()
+            setattr(self, lock_attr, lock)
+        async with lock:
+            return await func(self, *args, **kwargs)
+
+    return wrapper
+
+
 def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
     """Retry decorator for async functions with exponential backoff."""
 
