@@ -692,7 +692,14 @@ class NadoClient:
         return sorted(items.values(), key=lambda t: t.created_at)
 
     async def points(self) -> list[NadoPoint]:
-        res = await self._archive({"nado_points": {"address": self.address}})
+        rep = await self.http.request(
+            "POST",
+            "https://archive.prod.nado.xyz/rewards/v1",
+            json={"nado_points": {"address": self.address}},
+        )
+        if not rep.ok:
+            raise ApiError("Rewards error", rep)
+        res = rep.json()
 
         return [
             NadoPoint(
