@@ -60,6 +60,7 @@ async def print_info(accs: list[OmniClient]):
         Column("P/Price", "{:,.2f}", compute=lambda r: r["Burn"] / r["Points"]),
         Column("Balance", "{:,.2f}", total=sum),
         Column("Rank", justify="right"),
+        Column("Boost", "{:.0%}"),
         Column("Ref", justify="left"),
     )
 
@@ -67,8 +68,19 @@ async def print_info(accs: list[OmniClient]):
         p = await acc.profile() if await acc.registered() else None
         a = short_addr(acc.address)
         if not p:
-            return ("✗", acc.name, a, 0, 0, 0, 0, "", "")
-        return ("✓", acc.name, a, p.volume, -p.pnl, p.points, p.balance, p.rank, p.ref_code)
+            return ("✗", acc.name, a, 0, 0, 0, 0, "", 0, "")
+        return (
+            "✓",
+            acc.name,
+            a,
+            p.volume,
+            -p.pnl,
+            p.points,
+            p.balance,
+            p.rank,
+            p.referral_boost,
+            p.ref_code,
+        )
 
     for r in await gather_accs(accs, row):
         tbl.add_row(*r)

@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Self
 
 from eth_account.messages import encode_defunct
@@ -28,6 +28,8 @@ from strategy.execution import EntryQuality
 
 API_URL = "https://omni.variational.io/api"
 APP_URL = "https://omni.variational.io"
+
+_PAGINATION_DELAY = 1.0
 # Season was announced on Dec 17, but Omni UI labels week 1 as starting 6 days earlier.
 _POINTS_GENESIS = datetime(2025, 12, 17 - 6, tzinfo=UTC)
 
@@ -55,6 +57,10 @@ class IndicativeQuote(BaseModel):
 class PointsInfo(BaseModel):
     total_points: Decimal
     rank: int | None = None
+
+
+class OmniProfileInfo(ProfileInfo):
+    referral_boost: Decimal = Decimal(0)
 
 
 class OmniSupportedAsset(BaseModel):
@@ -458,6 +464,7 @@ class OmniClient:
             pld["offset"] += pld["limit"]
             if not res.get("pagination", {}).get("next_page"):
                 break
+            await asyncio.sleep(_PAGINATION_DELAY)
 
         for x in items:
             await self._call("POST", "/orders/cancel", json={"rfq_id": x["rfq_id"]})
@@ -528,10 +535,22 @@ class OmniClient:
         items = []
         while True:
             res = await self._call("GET", endpoint, params=pld)
+            pagination = res.get("pagination", {})
+            if pld["offset"] == 0:
+                count = int(pagination.get("object_count", 0))
+                pages = (count + pld["limit"] - 1) // pld["limit"]
+                if pages > 10:
+                    delay = utils.format_duration((pages - 1) * _PAGINATION_DELAY)
+                    name = endpoint.strip("/")
+                    logger.warning(
+                        f"Fetching {count:,} {name} across {pages} pages; "
+                        f"pagination delay: ~{delay}"
+                    )
             items.extend(res.get("result", []))
             pld["offset"] += pld["limit"]
-            if not res.get("pagination", {}).get("next_page"):
+            if not pagination.get("next_page"):
                 break
+            await asyncio.sleep(_PAGINATION_DELAY)
         return items
 
     async def points(self) -> list[OmniPoint]:
@@ -542,10 +561,22 @@ class OmniClient:
         res = await self._call("GET", "/points/summary")
         return PointsInfo(**res) if res else PointsInfo(total_points=Decimal(0))
 
-    async def total_volume(self) -> tuple[Decimal, str | None]:
-        res = await self._call("GET", "/referrals/summary") or {}
+    async def _referral_summary(self) -> tuple[Decimal, str | None, Decimal]:
+        raw = await self._call("GET", "/referrals/summary")
+        res = raw if isinstance(raw, dict) else {}
         vol = _volume_field_total(res.get("own_volume") or res.get("trade_volume"))
-        ref: str | None = (res.get("referred_by") or {}).get("code") or None
+        referred_by = res.get("referred_by")
+        referred_by = referred_by if isinstance(referred_by, dict) else {}
+        ref = referred_by.get("code")
+        ref = ref if isinstance(ref, str) and ref else None
+        try:
+            boost = max(Decimal(str(referred_by.get("points_boost", 1))) - 1, Decimal(0))
+        except (InvalidOperation, TypeError, ValueError):
+            boost = Decimal(0)
+        return vol, ref, boost
+
+    async def total_volume(self) -> tuple[Decimal, str | None]:
+        vol, ref, _boost = await self._referral_summary()
         return vol, ref
 
     async def leaderboard_self(self) -> OmniLeaderboardSelf:
@@ -561,19 +592,20 @@ class OmniClient:
     async def competition_opt_in(self) -> None:
         await self._call("POST", "/competition/opt_in")
 
-    async def profile(self) -> ProfileInfo:
+    async def profile(self) -> OmniProfileInfo:
         # Omni have Cloudflare protection, so do it one by one to avoid triggering anti-bot
         bal = await self.balance()
         pts = await self.points_total()
         lb = await self.leaderboard_self()
-        vol, ref = await self.total_volume()
+        vol, ref, boost = await self._referral_summary()
 
-        return ProfileInfo(
+        return OmniProfileInfo(
             addr=utils.short_addr(self.address),
             balance=bal,
             volume=vol,
             pnl=lb.pnl,
             points=pts.total_points,
             ref_code=ref,
+            referral_boost=boost,
             rank=lb.place,
         )
