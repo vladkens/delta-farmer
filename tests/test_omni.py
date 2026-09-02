@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from clients.omni import OmniClient
+from clients.omni import CloudflareClearanceUpdated, OmniClient
 from lib.http import ApiError, AsyncHttp
 
 
@@ -122,6 +122,38 @@ async def test_login_preparation_does_not_retry_solver_error(client):
         await OmniClient._prepare_login(client)
 
     client._request.assert_awaited_once()
+
+
+async def test_login_restarts_with_fresh_signing_data_after_clearance(client):
+    paths = []
+    signing_data = iter(
+        [
+            "omni.variational.io wants you to sign in: first",
+            "omni.variational.io wants you to sign in: second",
+        ]
+    )
+
+    async def request(_method, path, **kwargs):
+        paths.append(path)
+        if path == "/auth/generate_signing_data":
+            return Mock(text=next(signing_data))
+        if paths.count("/auth/login") == 1:
+            raise CloudflareClearanceUpdated
+        assert kwargs["replay_after_cf"] is False
+        client.http.session.cookies["vr-token"] = "new"
+        return Mock(ok=True)
+
+    client._request.side_effect = request
+
+    await client.login()
+
+    assert paths == [
+        "/auth/generate_signing_data",
+        "/auth/login",
+        "/auth/generate_signing_data",
+        "/auth/login",
+    ]
+    assert client.account.sign_message.call_count == 2
 
 
 async def test_call_relogs_only_once(client):

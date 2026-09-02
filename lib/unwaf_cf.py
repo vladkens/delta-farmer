@@ -13,6 +13,7 @@ from curl_cffi.requests.impersonate import DEFAULT_CHROME
 
 from lib.http import AsyncHttp, parse_proxy
 from lib.logger import logger
+from lib.utils import get_or
 
 # Algorithm adapted from: https://github.com/B00H0O/cloudflare-jsd-solver
 #
@@ -359,7 +360,9 @@ async def solve_managed_cf_clearance(
                 json={"clientKey": api_key, "task": {"taskId": task_id, "type": "cf_clearance"}},
             )
             res = rep.json()
-            token = res.get("solution", {}).get("token")
+            # Astrum moved cf_clearance from solution.token to solution.cookies.cf_clearance.
+            # Keep both paths while old and new response schemas coexist.
+            token = get_or(res, "solution.token") or get_or(res, "solution.cookies.cf_clearance")
             status = res.get("status")
 
             if status in {"opened", "in_progress"}:

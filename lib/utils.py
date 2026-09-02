@@ -10,15 +10,46 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast, overload
 
 from filelock import FileLock
 
 from .errors import AppError
 from .logger import logger
 
+GATHER_ACCS_LIMIT = 1
 
-async def gather_accs[T, R](accs: list[T], fn: Callable[[T], Awaitable[R]]) -> list[R]:
-    return list(await asyncio.gather(*(fn(acc) for acc in accs)))
+
+async def gather_accs[T, R](
+    accs: list[T],
+    fn: Callable[[T], Awaitable[R]],
+    *,
+    limit=GATHER_ACCS_LIMIT,
+) -> list[R]:
+    if limit < 1:
+        raise ValueError("Account concurrency limit must be at least 1")
+
+    semaphore = asyncio.Semaphore(limit)
+
+    async def run(acc: T) -> R:
+        async with semaphore:
+            return await fn(acc)
+
+    results = await asyncio.gather(*(run(acc) for acc in accs), return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+
+    failures = [
+        (getattr(acc, "name", str(acc)), result)
+        for acc, result in zip(accs, results)
+        if isinstance(result, Exception)
+    ]
+    if failures:
+        details = "; ".join(f"{name}: {error}" for name, error in failures)
+        raise AppError(f"Account tasks failed: {details}. Try again later.")
+
+    return cast(list[R], results)
 
 
 def first[T](items: list[T]) -> T | None:
@@ -27,6 +58,23 @@ def first[T](items: list[T]) -> T | None:
 
 def pick(d: dict, *keys: str) -> dict:
     return {k: d[k] for k in keys if k in d}
+
+
+@overload
+def get_or(obj: dict, key: str) -> Any | None: ...
+
+
+@overload
+def get_or[T](obj: dict, key: str, default_value: T) -> Any | T: ...
+
+
+def get_or(obj: dict, key: str, default_value: Any = None) -> Any:
+    for part in key.split("."):
+        if part not in obj:
+            return default_value
+        obj = obj[part]
+
+    return obj
 
 
 def shuffle[T](items: list[T]) -> list[T]:

@@ -10,7 +10,7 @@ from eth_account.messages import encode_defunct
 from pydantic import AliasPath, BaseModel, ConfigDict, Field
 
 from lib import utils
-from lib.decorators import bind_log_context, locked, retry, ttl_cache
+from lib.decorators import bind_log_context, locked, retry, retry_on, ttl_cache
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -30,6 +30,10 @@ API_URL = "https://omni.variational.io/api"
 APP_URL = "https://omni.variational.io"
 # Season was announced on Dec 17, but Omni UI labels week 1 as starting 6 days earlier.
 _POINTS_GENESIS = datetime(2025, 12, 17 - 6, tzinfo=UTC)
+
+
+class CloudflareClearanceUpdated(Exception):
+    """Cloudflare clearance was refreshed instead of replaying a request."""
 
 
 def _volume_field_total(value: Any) -> Decimal:
@@ -145,7 +149,9 @@ class OmniClient:
             cookies_file=f".cache/omni_{utils.short_addr(self.address)}_http.pkl",
         )
 
-    async def _request(self, method: HttpMethod, url: str, **kwargs):
+    async def _request(
+        self, method: HttpMethod, url: str, *, replay_after_cf: bool = True, **kwargs
+    ):
         rep = await self.http.request(method, url, **kwargs)
         is_cf_challenge = rep.status_code in {403, 429, 503} and (
             ">Just a moment...<" in rep.text or "/cdn-cgi/challenge-platform/" in rep.text
@@ -163,6 +169,12 @@ class OmniClient:
             logger.debug(f"Cloudflare JSD challenged {method} {url}; refreshing cf_clearance")
             if not await ensure_cf_clearance(self.http, target_url, force=True):
                 return rep
+
+        if not replay_after_cf:
+            raise CloudflareClearanceUpdated(
+                "Cloudflare clearance ready; restarting login with fresh signing data"
+            )
+
         return await self.http.request(method, url, **kwargs)
 
     async def _prepare_login(self) -> None:
@@ -179,6 +191,7 @@ class OmniClient:
         res = rep.json()
         return res["settlement_pool"] is not None
 
+    @retry_on(CloudflareClearanceUpdated, retries=1)
     async def _login(self) -> None:
         await self._prepare_login()
         pld = {"address": self.address}
@@ -190,7 +203,7 @@ class OmniClient:
         sig = self.account.sign_message(msg).signature.hex().replace("0x", "")
 
         pld = {"address": self.address, "signed_message": sig}
-        rep = await self._request("POST", "/auth/login", json=pld)
+        rep = await self._request("POST", "/auth/login", json=pld, replay_after_cf=False)
         if not rep.ok or "vr-token" not in self.http.session.cookies:
             raise ApiError("Login failed", rep)
 

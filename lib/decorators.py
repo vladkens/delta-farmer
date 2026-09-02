@@ -56,6 +56,27 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
     return decorator
 
 
+def retry_on(exception: type[Exception], *, retries: int = 1):
+    """Retry an async function immediately for one specific exception."""
+    retries = max(0, retries)
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            for attempt in range(retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except exception as e:
+                    if attempt == retries:
+                        raise
+                    message = str(e) or f"{func.__name__}: retrying after {exception.__name__}"
+                    logger.debug(message)
+
+        return wrapper
+
+    return decorator
+
+
 def ttl_cache(ttl: int):
     def decorator(func):
         cache = {}

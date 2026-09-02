@@ -1,6 +1,7 @@
 .PHONY: prepare check update update-dev clean
 
 prepare:
+	uv sync --locked --all-groups
 	uv run ruff format .
 	uv run ruff check --fix .
 	uv run ty check
