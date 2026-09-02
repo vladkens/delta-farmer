@@ -3,7 +3,7 @@
 import asyncio
 import base64
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Self
 from urllib.parse import urlencode
@@ -34,7 +34,8 @@ APP_URL = "https://www.rise.trade"
 RPC_URL = "https://rpc.risechain.com"
 LOGIN_MESSAGE = "Please sign in with your wallet to access RISEx."
 DEFAULT_MIN_TRADE_USD = Decimal(10)
-_POINTS_GENESIS = datetime(2026, 6, 1, tzinfo=UTC)
+_POINTS_GENESIS = datetime(2026, 7, 20, tzinfo=UTC)
+_OFF_LABEL = "OFF Season 0"
 
 _REGISTER_SIGNER = [
     {"name": "account", "type": "address"},
@@ -55,6 +56,11 @@ _VERIFY_WITNESS = [
     {"name": "hash", "type": "bytes32"},
     {"name": "nonceAnchor", "type": "uint48"},
     {"name": "nonceBitmap", "type": "uint8"},
+    {"name": "deadline", "type": "uint32"},
+]
+_LOGIN = [
+    {"name": "account", "type": "address"},
+    {"name": "nonce", "type": "uint256"},
     {"name": "deadline", "type": "uint32"},
 ]
 
@@ -272,6 +278,18 @@ class RiseVolumeStats(BaseModel):
     total_fee: Decimal = Decimal(0)
 
 
+class RisePointsInfo(BaseModel):
+    total_points: Decimal = Decimal(0)
+    rank: int | None = None
+
+
+class RisePoint(BaseModel):
+    epoch_id: str
+    start_window: datetime
+    points: Decimal
+    rank: int | None = None
+
+
 class RiseLeaderboardEntry(BaseModel):
     account_value: Decimal = Decimal(0)
     notional_pnl: Decimal = Decimal(0)
@@ -292,6 +310,8 @@ class RiseClient:
 
     @classmethod
     def to_week_label(cls, dt: datetime) -> str:
+        if dt < _POINTS_GENESIS:
+            return _OFF_LABEL
         return utils.to_period_week(dt, genesis=_POINTS_GENESIS)
 
     def __init__(self, name: str, privkey: str, proxy: str | None = None):
@@ -313,6 +333,8 @@ class RiseClient:
         self._rpc_id = 0
         self._order_markets: dict[str, int] = {}
         self._order_resting_ids: dict[str, str] = {}
+        self._points_token: str | None = None
+        self._points_token_expires_at = 0.0
 
     async def _call(self, method: HttpMethod, path: str, **kwargs):
         rep = await self.http.request(method, path, **kwargs)
@@ -858,6 +880,88 @@ class RiseClient:
         except ApiError:
             return RiseVolumeStats()
 
+    @locked
+    async def _points_login(self, *, force: bool = False) -> str:
+        now = time.time()
+        if not force and self._points_token and now < self._points_token_expires_at - 10:
+            return self._points_token
+
+        data = await self._call("GET", "/api/v1/auth/nonce", params={"account": self.address})
+        nonce = str(data["nonce"]).removeprefix("0x")
+        deadline = int(now) + 300
+        signature = await self._sign_hex(
+            "Login",
+            _LOGIN,
+            {
+                "account": self.address,
+                "nonce": int(nonce, 16),
+                "deadline": deadline,
+            },
+        )
+        rep = await self.http.request(
+            "POST",
+            f"{APP_URL}/api/risex-auth/login",
+            json={
+                "account": self.address,
+                "nonce": nonce,
+                "deadline": deadline,
+                "signature": signature,
+                "stayConnected": False,
+            },
+        )
+        if not rep.ok:
+            raise ApiError("Points login failed", rep)
+        payload = rep.json()
+        auth = payload.get("data", payload)
+        token = auth.get("access_token")
+        if not token:
+            raise ApiError("Points login returned no access token")
+        self._points_token = str(token)
+        self._points_token_expires_at = now + int(auth.get("expires_in", 300))
+        return self._points_token
+
+    async def _points_call(self, path: str) -> dict:
+        async def request(*, force_login: bool):
+            token = await self._points_login(force=force_login)
+            return await self.http.request(
+                "GET", path, headers={"Authorization": f"Bearer {token}"}
+            )
+
+        rep = await request(force_login=False)
+        if rep.status_code == 401:
+            rep = await request(force_login=True)
+        if not rep.ok:
+            raise ApiError("Points API error", rep)
+        payload = rep.json()
+        return payload.get("data", payload)
+
+    async def points_total(self) -> RisePointsInfo:
+        data = await self._points_call(f"/api/v1/points/{self.address}")
+        return RisePointsInfo.model_validate(data)
+
+    async def points_history(self) -> list[RisePoint]:
+        data = await self._points_call(f"/api/v1/points/{self.address}/history")
+        points = []
+        for entry in data.get("entries", []):
+            epoch = entry.get("epoch", {})
+            ledger = entry.get("ledger", {})
+            epoch_id = str(epoch.get("epoch_id", ""))
+            starts_at = int(epoch.get("starts_at", 0))
+            start_window = (
+                datetime.fromtimestamp(starts_at, tz=UTC)
+                if starts_at
+                else _POINTS_GENESIS - timedelta(weeks=1)
+            )
+            points.append(
+                RisePoint(
+                    epoch_id=epoch_id,
+                    start_window=start_window,
+                    points=Decimal(str(ledger.get("total_points", 0))),
+                    rank=entry.get("rank"),
+                )
+            )
+        return points
+
     async def _leaderboard_entry(self) -> RiseLeaderboardEntry:
         try:
             data = await self._call(
@@ -885,14 +989,18 @@ class RiseClient:
         return sum((x.realized_pnl for x in trades), Decimal(0))
 
     async def profile(self) -> ProfileInfo:
-        balance, volume, pnl, leaderboard = await asyncio.gather(
-            self.balance(), self.volume_stats(), self._realized_pnl(), self._leaderboard_entry()
+        balance, volume, pnl, leaderboard, points = await asyncio.gather(
+            self.balance(),
+            self.volume_stats(),
+            self._realized_pnl(),
+            self._leaderboard_entry(),
+            self.points_total(),
         )
         return ProfileInfo(
             addr=utils.short_addr(self.address),
             balance=balance or leaderboard.account_value,
             volume=volume.total_volume,
             pnl=pnl or leaderboard.notional_pnl,
-            points=Decimal(0),
-            rank=leaderboard.rank,
+            points=points.total_points,
+            rank=points.rank if points.rank is not None else leaderboard.rank,
         )

@@ -246,7 +246,9 @@ def hyena_pts() -> Pts:
 
 
 def rise_pts() -> Pts:
-    return {}
+    return _pts_by_period(
+        "rise_", "_points.pkl", "start_window", ["points"], RiseClient.to_week_label
+    )
 
 
 # MARK: ISO-week extractors (vol + burn + pts)
@@ -352,6 +354,8 @@ def rise_burn_weeks() -> ISOData:
             w = _to_iso_week(dt)
             out[w][0] += Decimal(str(r["price"])) * Decimal(str(r["size"]))
             out[w][1] -= Decimal(str(r.get("realized_pnl", 0)))
+    for w, pts in _isopts("rise_", "start_window", "points").items():
+        out[w][2] += pts
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
 

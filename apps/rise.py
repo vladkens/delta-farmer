@@ -1,9 +1,10 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
+import asyncio
 from collections import defaultdict
 from decimal import Decimal
 
-from clients.rise import RiseClient, RiseTrade
+from clients.rise import RiseClient, RisePoint, RiseTrade
 from lib.cli import create_cli, create_clients, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -21,6 +22,13 @@ async def sync_trades(acc: RiseClient, ttl: int) -> list[RiseTrade]:
     return store.get_all()
 
 
+async def sync_points(acc: RiseClient, ttl: int) -> list[RisePoint]:
+    store_path = f".cache/rise_{short_addr(acc.address)}_points.pkl"
+    store = DataStore(store_path, id_key="epoch_id", model=RisePoint)
+    await store.sync(lambda _: acc.points_history(), ttl_sec=ttl)
+    return store.get_all()
+
+
 # MARK: Reports
 
 
@@ -31,7 +39,7 @@ async def print_info(accs: list[RiseClient]):
         Column("Address", justify="left"),
         Column("Volume", "{:,.0f}", total=sum),
         Column("Burn", "{:,.2f}", total=sum),
-        Column("Points", "{:,.0f}", total=sum),
+        Column("Points", "{:,.1f}", total=sum),
         Column("P/Price", "{:,.4f}", compute=lambda r: r["Burn"] / r["Points"]),
         Column("Balance", "{:,.2f}", total=sum),
         Column("Rank", justify="right"),
@@ -55,11 +63,15 @@ async def print_stats(accs: list[RiseClient], period="week", filter_period="all"
     gvol = defaultdict(lambda: defaultdict(Decimal))
     gpnl = defaultdict(lambda: defaultdict(Decimal))
     gfee = defaultdict(lambda: defaultdict(Decimal))
+    gpts = defaultdict(lambda: defaultdict(Decimal))
 
     period_fn = to_period_day if period == "day" else RiseClient.to_week_label
     ttl = 0 if force else 3600
 
-    all_trades = await gather_accs(accs, lambda acc: sync_trades(acc, ttl))
+    all_trades, all_points = await asyncio.gather(
+        gather_accs(accs, lambda acc: sync_trades(acc, ttl)),
+        gather_accs(accs, lambda acc: sync_points(acc, ttl)),
+    )
 
     for acc, trades in zip(accs, all_trades):
         for trade in trades:
@@ -68,8 +80,11 @@ async def print_stats(accs: list[RiseClient], period="week", filter_period="all"
             gpnl[pk][acc.name] += trade.realized_pnl
             gfee[pk][acc.name] += trade.fee
             gcnt[pk][acc.name] += 1
+    for acc, points in zip(accs, all_points):
+        for point in points:
+            gpts[period_fn(point.start_window)][acc.name] += point.points
 
-    all_periods = sorted(gvol.keys() | gpnl.keys())
+    all_periods = sorted(gvol.keys() | gpnl.keys() | gpts.keys())
     periods_to_show = parse_filter(filter_period, all_periods)
     all_names = [x.name for x in accs]
 
@@ -81,12 +96,13 @@ async def print_stats(accs: list[RiseClient], period="week", filter_period="all"
             vol = gvol[pk][name]
             pnl = gpnl[pk][name]
             fee = gfee[pk][name]
-            if not vol and not pnl:
+            points = gpts[pk][name]
+            if not vol and not pnl and not points:
                 continue
-            rows.append(PeriodRow(name, cnt, vol, -pnl, Decimal(0), fee))
+            rows.append(PeriodRow(name, cnt, vol, -pnl, points, fee))
         periods_data[pk] = rows
 
-    render_stats(periods_data, periods_to_show, points_fmt="{:,.0f}", pprice_fmt="{:,.4f}")
+    render_stats(periods_data, periods_to_show, points_fmt="{:,.1f}", pprice_fmt="{:,.4f}")
 
 
 async def main():
