@@ -1,6 +1,6 @@
 [project]
 name = "delta-farmer"
-version = "0.8.3"
+version = "0.9.0"
 description = "Automated delta-neutral trading for crypto points farming across perpetual DEXs"
 readme = "readme.md"
 requires-python = "==3.14.*"
@@ -64,4 +64,6 @@ error-on-warning = true
 [tool.ty.rules]
 all = "error"
 missing-type-argument = "ignore"
+unsound-assignment = "ignore"
+unsound-return-statement = "ignore"
 missing-override-decorator = "ignore"

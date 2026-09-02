@@ -3,15 +3,16 @@
 import asyncio
 import inspect
 import time
+from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from .logger import logger
 
 
-def locked(func):
+def locked[Func: Callable[..., Awaitable[Any]]](func: Func) -> Func:
     """Run at most one call to an async instance method at a time."""
-    lock_attr = f"_{func.__name__}_lock"
+    lock_attr = f"_{getattr(func, '__name__', type(func).__name__)}_lock"
 
     @wraps(func)
     async def wrapper(self, *args, **kwargs):
@@ -22,16 +23,20 @@ def locked(func):
         async with lock:
             return await func(self, *args, **kwargs)
 
-    return wrapper
+    return cast(Func, wrapper)
 
 
-def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
+def retry[Func: Callable[..., Awaitable[Any]]](
+    max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0
+) -> Callable[[Func], Func]:
     """Retry decorator for async functions with exponential backoff."""
 
-    def decorator(func):
+    def decorator(func: Func) -> Func:
+        func_name = getattr(func, "__name__", type(func).__name__)
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            last_exception = None
+            last_exception: Exception | None = None
             wait = delay
 
             for attempt in range(1, max_attempts + 1):
@@ -41,26 +46,31 @@ def retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
                     last_exception = e
                     if attempt < max_attempts:
                         logger.debug(
-                            f"{func.__name__} failed (attempt {attempt}/{max_attempts}),"
+                            f"{func_name} failed (attempt {attempt}/{max_attempts}),"
                             f" retrying in {wait:.1f}s..."
                         )
                         await asyncio.sleep(wait)
                         wait *= backoff
                     else:
-                        logger.error(f"{func.__name__} failed after {max_attempts} attempts")
+                        logger.error(f"{func_name} failed after {max_attempts} attempts")
 
-            raise last_exception  # type: ignore
+            assert last_exception is not None
+            raise last_exception
 
-        return wrapper
+        return cast(Func, wrapper)
 
     return decorator
 
 
-def retry_on(exception: type[Exception], *, retries: int = 1):
+def retry_on[Func: Callable[..., Awaitable[Any]]](
+    exception: type[Exception], *, retries: int = 1
+) -> Callable[[Func], Func]:
     """Retry an async function immediately for one specific exception."""
     retries = max(0, retries)
 
-    def decorator(func):
+    def decorator(func: Func) -> Func:
+        func_name = getattr(func, "__name__", type(func).__name__)
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
             for attempt in range(retries + 1):
@@ -69,18 +79,18 @@ def retry_on(exception: type[Exception], *, retries: int = 1):
                 except exception as e:
                     if attempt == retries:
                         raise
-                    message = str(e) or f"{func.__name__}: retrying after {exception.__name__}"
+                    message = str(e) or f"{func_name}: retrying after {exception.__name__}"
                     logger.debug(message)
 
-        return wrapper
+        return cast(Func, wrapper)
 
     return decorator
 
 
-def ttl_cache(ttl: int):
-    def decorator(func):
-        cache = {}
-        timestamps = {}
+def ttl_cache[Func: Callable[..., Any]](ttl: int) -> Callable[[Func], Func]:
+    def decorator(func: Func) -> Func:
+        cache: dict[object, Any] = {}
+        timestamps: dict[object, float] = {}
 
         @wraps(func)
         def sync_wrapper(*args, **kwargs):
@@ -104,7 +114,8 @@ def ttl_cache(ttl: int):
 
             return cache[key]
 
-        return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+        wrapper = async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper
+        return cast(Func, wrapper)
 
     return decorator
 

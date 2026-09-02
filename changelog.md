@@ -1,3 +1,32 @@
+## v0.9.0 – 2026-09-02
+
+### Breaking Changes
+
+- Replaced the `zero1` integration with `n1` after 01.xyz migrated to N1.
+- Removed the defunct Onyx integration.
+
+### Features
+
+- Added N1 account info, positions, statistics, closing, and trading support.
+- Added shared `login` and `login --force` commands with automatic retries for all exchange apps.
+- Added Rise points and rank reporting to account info, statistics, and weekly summaries.
+- Added referral points boost reporting to Omni account info.
+
+### Fixes
+
+- Fixed Nado points retrieval after the rewards API moved to a new endpoint.
+- Fixed Omni login and Cloudflare solver compatibility, including updated Astrum clearance responses and clearer out-of-funds guidance.
+- Fixed long Omni history syncs triggering Cloudflare challenges by pacing paginated requests and warning about lengthy downloads.
+- Fixed multi-exchange `foreach` commands stopping after the first failed exchange.
+
+### Improvements
+
+- Improved multi-account commands with bounded parallel execution and clearer account failure reporting.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.8.3...v0.9.0
+
+---
+
 ## v0.8.3 – 2026-07-15
 
 ### Features
