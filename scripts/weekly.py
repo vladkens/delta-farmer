@@ -31,7 +31,6 @@ from clients.hyena import HyenaClient, HyenaHistoryItem
 from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
-from clients.onyx import OnyxClient
 from clients.pacifica import PacificaClient
 from clients.rise import RiseClient
 from lib.table import AutoTable, Column
@@ -170,21 +169,6 @@ def hyena_stats() -> Stats:
     return out
 
 
-def onyx_stats() -> Stats:
-    out: Stats = {}
-    for path in glob_cache("onyx_", "_fills.pkl"):
-        for r in load_pkl(path):
-            dt = datetime.fromtimestamp(r["time"] / 1000, tz=UTC)
-            lbl = OnyxClient.to_week_label(dt)
-            vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
-            vol += Decimal(str(r["px"])) * Decimal(str(r["sz"]))
-            out[lbl] = (
-                vol,
-                burn - Decimal(str(r.get("closedPnl", 0))) + Decimal(str(r.get("fee", 0))),
-            )
-    return out
-
-
 def rise_stats() -> Stats:
     out: Stats = {}
     for path in glob_cache("rise_", "_trades.pkl"):
@@ -259,12 +243,6 @@ def hyena_pts() -> Pts:
         for r in load_pkl(path):
             out[r["period"]] += Decimal(str(r["enaxPoints"]))
     return dict(out)
-
-
-def onyx_pts() -> Pts:
-    return _pts_by_period(
-        "onyx_", "_points.pkl", "start_window", ["points"], OnyxClient.to_week_label
-    )
 
 
 def rise_pts() -> Pts:
@@ -354,19 +332,6 @@ def omni_burn_weeks() -> ISOData:
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
 
-def onyx_burn_weeks() -> ISOData:
-    out = _isoout()
-    for path in glob_cache("onyx_", "_fills.pkl"):
-        for r in load_pkl(path):
-            dt = datetime.fromtimestamp(r["time"] / 1000, tz=UTC)
-            w = _to_iso_week(dt)
-            out[w][0] += Decimal(str(r["px"])) * Decimal(str(r["sz"]))
-            out[w][1] -= Decimal(str(r.get("closedPnl", 0))) - Decimal(str(r.get("fee", 0)))
-    for w, pts in _isopts("onyx_", "start_window", "points").items():
-        out[w][2] += pts
-    return {k: (v[0], v[1], v[2]) for k, v in out.items()}
-
-
 def pacifica_burn_weeks() -> ISOData:
     out = _isoout()
     for path in glob_cache("pacifica_", "_trades.pkl"):
@@ -419,7 +384,6 @@ EXCHANGES: list[tuple[str, Any, Any, Any | None]] = [
     ("Hyena", hyena_stats, hyena_pts, HyenaClient.to_week_label),
     ("Nado", nado_stats, nado_pts, None),
     ("Omni", omni_stats, omni_pts, None),
-    ("Onyx", onyx_stats, onyx_pts, OnyxClient.to_week_label),
     ("Pacifica", pacifica_stats, pacifica_pts, None),
     ("Rise", rise_stats, rise_pts, RiseClient.to_week_label),
     ("N1", n1_stats, n1_pts, None),
@@ -430,7 +394,6 @@ BURN_EXCHANGES = [
     ("Hyena", hyena_burn_weeks),
     ("Nado", nado_burn_weeks),
     ("Omni", omni_burn_weeks),
-    ("Onyx", onyx_burn_weeks),
     ("Pacifica", pacifica_burn_weeks),
     ("Rise", rise_burn_weeks),
     ("N1", n1_burn_weeks),

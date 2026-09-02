@@ -8,9 +8,7 @@
 
 <div align="center">
 
-[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127)
-[<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0)
-[<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
+[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127) [<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0) [<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
 
 </div>
 
@@ -44,16 +42,15 @@ You control the size, timing, leverage, and which exchange to run on. The bot ha
 
 ## Supported Exchanges
 
-| Name     | Network | Link                                          | Referral                                                           |
-| -------- | ------- | --------------------------------------------- | ------------------------------------------------------------------ |
-| Ethereal | EVM     | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X)            |
-| HyENA    | EVM     | [hyena.trade](https://app.hyena.trade/)       | [Sign up](https://app.hyena.trade/ref/VLADKENS)                    |
-| Nado     | EVM     | [nado.xyz](https://app.nado.xyz/)             | [Sign up](https://app.nado.xyz?join=yUAjz7a)                       |
-| Omni     | EVM     | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io)                             |
-| Onyx     | EVM     | [onyx.live](https://app.onyx.live/)           | [Sign up](https://app.onyx.live/?ref=BB7M4BW3)                     |
-| Pacifica | Solana  | [pacifica.fi](https://app.pacifica.fi)        | [Sign up](https://app.pacifica.fi?referral=uid127)                 |
-| RiseX    | EVM     | [rise.trade](https://www.rise.trade/)         | [Sign up](https://www.rise.trade/)                                 |
-| N1       | EVM     | [n1.xyz](https://app.n1.xyz/)                 | [Sign up](https://app.n1.xyz/r/vladkens)                           |
+| Name | Network | Link | Referral |
+| --- | --- | --- | --- |
+| Ethereal | EVM | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X) |
+| HyENA | EVM | [hyena.trade](https://app.hyena.trade/) | [Sign up](https://app.hyena.trade/ref/VLADKENS) |
+| Nado | EVM | [nado.xyz](https://app.nado.xyz/) | [Sign up](https://app.nado.xyz?join=yUAjz7a) |
+| Omni | EVM | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io) |
+| Pacifica | Solana | [pacifica.fi](https://app.pacifica.fi) | [Sign up](https://app.pacifica.fi?referral=uid127) |
+| RiseX | EVM | [rise.trade](https://www.rise.trade/) | [Sign up](https://www.rise.trade/) |
+| N1 | EVM | [n1.xyz](https://app.n1.xyz/) | [Sign up](https://app.n1.xyz/r/vladkens) |
 
 ### Exchange updates
 
@@ -110,7 +107,7 @@ That's it. Dependencies are installed automatically on the first run.
 
 ## Quick Start
 
-Replace `<app>` with your exchange name throughout: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `onyx`, `rise`, or `n1`.
+Replace `<app>` with your exchange name throughout: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `rise`, or `n1`.
 
 **Step 1 — Create a config file**
 
@@ -186,8 +183,7 @@ uv run apps/<app>.py --help
 
 ### Logs
 
-By default, logs are printed only to the terminal. For trading runs, set
-`DF_LOG_FILE=1` to also write logs to `logs/<timestamp>-<app>.log`:
+By default, logs are printed only to the terminal. For trading runs, set `DF_LOG_FILE=1` to also write logs to `logs/<timestamp>-<app>.log`:
 
 ```bash
 DF_LOG_FILE=1 uv run apps/<app>.py trade
@@ -195,8 +191,7 @@ DF_LOG_FILE=1 uv run apps/<app>.py trade
 
 ### Weekly summary
 
-`scripts/weekly.py` reads cached stats from `.cache`. Refresh exchange data first with
-`uv run apps/<app>.py stats --force` when you need fresh numbers.
+`scripts/weekly.py` reads cached stats from `.cache`. Refresh exchange data first with `uv run apps/<app>.py stats --force` when you need fresh numbers.
 
 ```bash
 uv run scripts/weekly.py                    # All-time summary by exchange
@@ -220,12 +215,9 @@ uv run apps/omni.py competition              # Show Omni competition status
 uv run apps/omni.py competition --join       # Opt in all configured Omni accounts
 uv run apps/hyena.py reward claim            # Claim Hyena rewards
 uv run apps/hyena.py migrate                 # Migrate Hyena HyperLiquid accounts to unified mode
-uv run apps/onyx.py migrate                  # Migrate Onyx HyperLiquid accounts to unified mode
 ```
 
-Omni competition commands check the active tournament window, join status, eligibility volume,
-and leaderboard places. Hyena and Onyx migration commands switch HyperLiquid-backed accounts to
-Unified Account mode when the exchange reports a legacy account mode.
+Omni competition commands check the active tournament window, join status, eligibility volume, and leaderboard places. The Hyena migration command switches HyperLiquid-backed accounts to Unified Account mode when the exchange reports a legacy account mode.
 
 ### Omni login issues
 
@@ -233,17 +225,13 @@ Some users report login issues with Omni. As a workaround, run `uv run apps/omni
 
 ### Omni Cloudflare challenges
 
-Omni handles Cloudflare challenges automatically. By default it uses the shared solver gateway,
-so no extra configuration is required. To use your own Astrum solver account instead, [register
-with Astrum](https://solver.astrum.foundation/), add funds, create an API key, and add it to
-`configs/omni.toml`:
+Omni handles Cloudflare challenges automatically. By default it uses the shared solver gateway, so no extra configuration is required. To use your own Astrum solver account instead, [register with Astrum](https://solver.astrum.foundation/), add funds, create an API key, and add it to `configs/omni.toml`:
 
 ```toml
 captcha_key = "your-astrum-key"
 ```
 
-`captcha_key` takes priority over the `CAPTCHA_KEY` value in `.env`. Leave it unset to use the
-shared gateway. Run `uv run apps/omni.py config encrypt` after adding the key.
+`captcha_key` takes priority over the `CAPTCHA_KEY` value in `.env`. Leave it unset to use the shared gateway. Run `uv run apps/omni.py config encrypt` after adding the key.
 
 ---
 
@@ -253,23 +241,23 @@ All settings live in your `configs/<app>.toml` file. Here is every available par
 
 ### Core settings
 
-| Parameter           | Default  | Description                                                                                                                                              |
-| ------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `leverage`          | `10`     | Leverage multiplier (1–49). Set it to the **lowest** max leverage across all your chosen symbols.                                                        |
-| `symbols`           | required | Trading pairs, e.g. `["BTC"]` or `["BTC", "ETH"]`. Check the exchange UI for available symbols.                                                          |
-| `symbols_per_trade` | `1`      | How many symbols to trade per cycle. `1` = classic mode and may sample one symbol from the list; `2`–`4` = basket mode and must match the length of `symbols`. |
-| `market_hours`      | `"auto"` | Market-hours pre-check mode: `"auto"` checks planned open only, `"strict"` checks planned open and close, `"off"` disables the pre-check.                 |
-| `use_limit`         | `false`  | If `true`, the prime account opens with a limit order instead of a market order — reduces fees.                                                          |
-| `first_as_prime`    | `false`  | If `true`, the first account in the list is always the prime (limit-side). If `false`, it rotates randomly each cycle. Ignored when `group_size` is set. |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `leverage` | `10` | Leverage multiplier (1–49). Set it to the **lowest** max leverage across all your chosen symbols. |
+| `symbols` | required | Trading pairs, e.g. `["BTC"]` or `["BTC", "ETH"]`. Check the exchange UI for available symbols. |
+| `symbols_per_trade` | `1` | How many symbols to trade per cycle. `1` = classic mode and may sample one symbol from the list; `2`–`4` = basket mode and must match the length of `symbols`. |
+| `market_hours` | `"auto"` | Market-hours pre-check mode: `"auto"` checks planned open only, `"strict"` checks planned open and close, `"off"` disables the pre-check. |
+| `use_limit` | `false` | If `true`, the prime account opens with a limit order instead of a market order — reduces fees. |
+| `first_as_prime` | `false` | If `true`, the first account in the list is always the prime (limit-side). If `false`, it rotates randomly each cycle. Ignored when `group_size` is set. |
 
 ### Trade sizing
 
 Exactly one of these is required — you cannot use both.
 
-| Parameter        | Default | Description                                                                                                         |
-| ---------------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
-| `trade_size_usd` | —       | Total notional per cycle in USD, as a range: `{ min = 140, max = 160 }`. The amount is split 50% prime / 50% hedge. |
-| `trade_size_pct` | —       | Size as a fraction of account balance (e.g. `0.5` = 50%). The tightest account sets the binding constraint.         |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `trade_size_usd` | — | Total notional per cycle in USD, as a range: `{ min = 140, max = 160 }`. The amount is split 50% prime / 50% hedge. |
+| `trade_size_pct` | — | Size as a fraction of account balance (e.g. `0.5` = 50%). The tightest account sets the binding constraint. |
 
 ### Timing
 
@@ -292,18 +280,17 @@ limit_wait_retries = 99
 limit_market_fallback = true
 ```
 
-| Parameter               | Default | Description                                                                                                                    |
-| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `limit_wait`            | `"90s"` | How long to wait for a limit order to fill.                                                                                    |
-| `limit_wait_retries`    | `99`    | Extra `limit_wait` windows to keep waiting while BBO stays near the original limit price. `0` = disabled.                     |
-| `limit_market_fallback` | `true`  | If the limit order times out, fall back to a market order. Set to `false` to abort the cycle instead.                          |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `limit_wait` | `"90s"` | How long to wait for a limit order to fill. |
+| `limit_wait_retries` | `99` | Extra `limit_wait` windows to keep waiting while BBO stays near the original limit price. `0` = disabled. |
+| `limit_market_fallback` | `true` | If the limit order times out, fall back to a market order. Set to `false` to abort the cycle instead. |
 
 Maximum wait for one limit order is `limit_wait * (1 + limit_wait_retries)`. Higher retry counts favor maker fills, but require longer tradeability windows before opening and closing positions.
 
 ### Entry gate settings
 
-Before opening a position, the bot can wait for acceptable entry spread/depth. Set
-`max_entry_spread_pct = null` to disable this gate.
+Before opening a position, the bot can wait for acceptable entry spread/depth. Set `max_entry_spread_pct = null` to disable this gate.
 
 ```toml
 max_entry_spread_pct = 0.25
@@ -311,48 +298,48 @@ entry_gate_wait = "5m"
 entry_gate_poll = "3s"
 ```
 
-| Parameter              | Default | Description                                                             |
-| ---------------------- | ------- | ----------------------------------------------------------------------- |
-| `max_entry_spread_pct` | `0.25`  | Maximum estimated entry spread/depth percent before opening a position. |
-| `entry_gate_wait`      | `"5m"`  | Maximum time to wait for acceptable entry quality before skipping.      |
-| `entry_gate_poll`      | `"3s"`  | How often to re-check entry quality while waiting. Must be 1–10 seconds. |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `max_entry_spread_pct` | `0.25` | Maximum estimated entry spread/depth percent before opening a position. |
+| `entry_gate_wait` | `"5m"` | Maximum time to wait for acceptable entry quality before skipping. |
+| `entry_gate_poll` | `"3s"` | How often to re-check entry quality while waiting. Must be 1–10 seconds. |
 
 ### Safety limits
 
-| Parameter            | Default | Description                                                                                                                                                 |
-| -------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `position_roi_limit` | `0.8`   | Emergency-close the full cycle if any single position reaches ±80% ROI.                                                                                     |
-| `combined_roi_limit` | `0.1`   | Emergency-close if the combined basket ROI reaches ±10%.                                                                                                    |
-| `max_failures`       | `0`     | Stop the strategy after this many consecutive cycle failures. `0` = never stop — retries indefinitely with exponential backoff (up to 1h between attempts). |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `position_roi_limit` | `0.8` | Emergency-close the full cycle if any single position reaches ±80% ROI. |
+| `combined_roi_limit` | `0.1` | Emergency-close if the combined basket ROI reaches ±10%. |
+| `max_failures` | `0` | Stop the strategy after this many consecutive cycle failures. `0` = never stop — retries indefinitely with exponential backoff (up to 1h between attempts). |
 
 ### Grouped trading
 
-| Parameter          | Default | Description                                                                                                   |
-| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------- |
-| `group_size`       | —       | Split accounts into independent groups. Must be 2–5. Total enabled accounts must be divisible by this number. |
-| `regroup_interval` | —       | Re-sort accounts by balance and restart groups on this interval. Only active when `group_size` is set.        |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `group_size` | — | Split accounts into independent groups. Must be 2–5. Total enabled accounts must be divisible by this number. |
+| `regroup_interval` | — | Re-sort accounts by balance and restart groups on this interval. Only active when `group_size` is set. |
 
 ### Accounts
 
 Add one `[[accounts]]` block per wallet.
 
-| Parameter | Default  | Description                                                                    |
-| --------- | -------- | ------------------------------------------------------------------------------ |
-| `name`    | required | Display name shown in logs and stats.                                          |
-| `privkey` | required | Private key. Fill it in, then run `config encrypt`.                            |
-| `proxy`   | —        | Optional HTTP proxy: `"http://user:pass@host:port"`.                           |
-| `enabled` | `true`   | Set to `false` to exclude this account from trading while keeping it in stats. |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `name` | required | Display name shown in logs and stats. |
+| `privkey` | required | Private key. Fill it in, then run `config encrypt`. |
+| `proxy` | — | Optional HTTP proxy: `"http://user:pass@host:port"`. |
+| `enabled` | `true` | Set to `false` to exclude this account from trading while keeping it in stats. |
 
 ### Telegram (optional)
 
 Add a `[telegram]` block to enable notifications.
 
-| Parameter         | Default      | Description                                                                                                        |
-| ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `token`           | —            | Bot token from [@BotFather](https://t.me/BotFather). Run `config encrypt` after adding it.                         |
-| `chat_id`         | —            | Your personal or group chat ID. Get it from [@userinfobot](https://t.me/userinfobot).                              |
-| `notify`          | all channels | List of notification channels to enable. Remove any to silence them: `"start"`, `"stop"`, `"errors"`, `"reports"`. |
-| `report_interval` | `"1h"`       | How often to send a periodic stats digest.                                                                         |
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `token` | — | Bot token from [@BotFather](https://t.me/BotFather). Run `config encrypt` after adding it. |
+| `chat_id` | — | Your personal or group chat ID. Get it from [@userinfobot](https://t.me/userinfobot). |
+| `notify` | all channels | List of notification channels to enable. Remove any to silence them: `"start"`, `"stop"`, `"errors"`, `"reports"`. |
+| `report_interval` | `"1h"` | How often to send a periodic stats digest. |
 
 ---
 
@@ -360,9 +347,7 @@ Add a `[telegram]` block to enable notifications.
 
 ### Classic mode (single symbol)
 
-One cycle trades one symbol: one account goes long, the other goes short. If you configure
-multiple symbols with `symbols_per_trade = 1`, the bot samples one currently tradeable symbol
-per cycle.
+One cycle trades one symbol: one account goes long, the other goes short. If you configure multiple symbols with `symbols_per_trade = 1`, the bot samples one currently tradeable symbol per cycle.
 
 ```toml
 symbols = ["BTC"]
@@ -524,12 +509,12 @@ Set `DF_TELEMETRY=0` to opt out completely.
 
 ## Environment Variables
 
-| Variable                  | Description                                           |
-| ------------------------- | ----------------------------------------------------- |
-| `DF_CONFIG_PASSWORD`      | Config encryption password for non-interactive runs.  |
+| Variable                  | Description                                            |
+| ------------------------- | ------------------------------------------------------ |
+| `DF_CONFIG_PASSWORD`      | Config encryption password for non-interactive runs.   |
 | `DF_LOG_FILE=1`           | Also write trade logs to `logs/<timestamp>-<app>.log`. |
-| `DF_NO_UPDATE_NOTIFIER=1` | Disable release update checks.                        |
-| `DF_TELEMETRY=0`          | Disable anonymous usage telemetry.                    |
+| `DF_NO_UPDATE_NOTIFIER=1` | Disable release update checks.                         |
+| `DF_TELEMETRY=0`          | Disable anonymous usage telemetry.                     |
 
 ## Risk Disclaimer
 

@@ -8,9 +8,7 @@
 
 <div align="center">
 
-[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127)
-[<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0)
-[<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
+[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127) [<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0) [<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
 
 </div>
 
@@ -44,16 +42,15 @@ Delta-farmer автоматически открывает совпадающи�
 
 ## Поддерживаемые биржи
 
-| Название | Сеть    | Ссылка                                        | Referral                                                           |
-| -------- | ------- | --------------------------------------------- | ------------------------------------------------------------------ |
-| Ethereal | EVM     | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X)            |
-| HyENA    | EVM     | [hyena.trade](https://app.hyena.trade/)       | [Sign up](https://app.hyena.trade/ref/VLADKENS)                    |
-| Nado     | EVM     | [nado.xyz](https://app.nado.xyz/)             | [Sign up](https://app.nado.xyz?join=yUAjz7a)                       |
-| Omni     | EVM     | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io)                             |
-| Onyx     | EVM     | [onyx.live](https://app.onyx.live/)           | [Sign up](https://app.onyx.live/?ref=BB7M4BW3)                     |
-| Pacifica | Solana  | [pacifica.fi](https://app.pacifica.fi)        | [Sign up](https://app.pacifica.fi?referral=uid127)                 |
-| RiseX    | EVM     | [rise.trade](https://www.rise.trade/)         | [Sign up](https://www.rise.trade/)                                 |
-| N1       | EVM     | [n1.xyz](https://app.n1.xyz/)                 | [Sign up](https://app.n1.xyz/r/vladkens)                           |
+| Название | Сеть | Ссылка | Referral |
+| --- | --- | --- | --- |
+| Ethereal | EVM | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X) |
+| HyENA | EVM | [hyena.trade](https://app.hyena.trade/) | [Sign up](https://app.hyena.trade/ref/VLADKENS) |
+| Nado | EVM | [nado.xyz](https://app.nado.xyz/) | [Sign up](https://app.nado.xyz?join=yUAjz7a) |
+| Omni | EVM | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io) |
+| Pacifica | Solana | [pacifica.fi](https://app.pacifica.fi) | [Sign up](https://app.pacifica.fi?referral=uid127) |
+| RiseX | EVM | [rise.trade](https://www.rise.trade/) | [Sign up](https://www.rise.trade/) |
+| N1 | EVM | [n1.xyz](https://app.n1.xyz/) | [Sign up](https://app.n1.xyz/r/vladkens) |
 
 ### Обновления бирж
 
@@ -110,7 +107,7 @@ cd delta-farmer
 
 ## Быстрый старт
 
-Везде ниже заменяйте `<app>` на имя exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `onyx`, `rise` или `n1`.
+Везде ниже заменяйте `<app>` на имя exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `rise` или `n1`.
 
 **Шаг 1 — создайте config**
 
@@ -186,8 +183,7 @@ uv run apps/<app>.py --help
 
 ### Логи
 
-По умолчанию логи выводятся только в терминал. Для торговых запусков установите
-`DF_LOG_FILE=1`, чтобы дополнительно писать логи в `logs/<timestamp>-<app>.log`:
+По умолчанию логи выводятся только в терминал. Для торговых запусков установите `DF_LOG_FILE=1`, чтобы дополнительно писать логи в `logs/<timestamp>-<app>.log`:
 
 ```bash
 DF_LOG_FILE=1 uv run apps/<app>.py trade
@@ -219,10 +215,9 @@ uv run apps/omni.py competition              # Показать статус Omn
 uv run apps/omni.py competition --join       # Зарегистрировать все настроенные Omni accounts
 uv run apps/hyena.py reward claim            # Забрать Hyena rewards
 uv run apps/hyena.py migrate                 # Перевести Hyena HyperLiquid accounts в unified mode
-uv run apps/onyx.py migrate                  # Перевести Onyx HyperLiquid accounts в unified mode
 ```
 
-Команды Omni competition показывают активное окно турнира, статус участия, eligibility volume и места в leaderboard. Команды Hyena и Onyx `migrate` переводят HyperLiquid-backed аккаунты в Unified Account mode, если exchange сообщает legacy account mode.
+Команды Omni competition показывают активное окно турнира, статус участия, eligibility volume и места в leaderboard. Команда Hyena `migrate` переводит HyperLiquid-backed аккаунты в Unified Account mode, если exchange сообщает legacy account mode.
 
 ### Проблемы со входом в Omni
 
@@ -236,33 +231,33 @@ uv run apps/onyx.py migrate                  # Перевести Onyx HyperLiqu
 
 ### Основные настройки
 
-| Параметр           | По умолчанию | Описание                                                                                                                                                       |
-| ------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `leverage`          | `10`     | Множитель leverage (1-49). Ставьте **минимальный** max leverage среди выбранных symbols.                                                                        |
-| `symbols`           | required | Торговые пары, например `["BTC"]` или `["BTC", "ETH"]`. Доступные symbols проверяйте в UI exchange.                                                            |
-| `symbols_per_trade` | `1`      | Сколько symbols торговать за цикл. `1` = classic mode и может выбирать один symbol из списка; `2`-`4` = basket mode и должно совпадать с длиной `symbols`.      |
-| `market_hours`      | `"auto"` | Режим market-hours pre-check: `"auto"` проверяет только planned open, `"strict"` проверяет planned open и close, `"off"` отключает проверку.                  |
-| `use_limit`         | `false`  | Если `true`, prime account открывается limit order вместо market order — это снижает fees.                                                                     |
-| `first_as_prime`    | `false`  | Если `true`, первый аккаунт в списке всегда prime (limit-side). Если `false`, prime выбирается случайно каждый цикл. Игнорируется, если задан `group_size`.     |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `leverage` | `10` | Множитель leverage (1-49). Ставьте **минимальный** max leverage среди выбранных symbols. |
+| `symbols` | required | Торговые пары, например `["BTC"]` или `["BTC", "ETH"]`. Доступные symbols проверяйте в UI exchange. |
+| `symbols_per_trade` | `1` | Сколько symbols торговать за цикл. `1` = classic mode и может выбирать один symbol из списка; `2`-`4` = basket mode и должно совпадать с длиной `symbols`. |
+| `market_hours` | `"auto"` | Режим market-hours pre-check: `"auto"` проверяет только planned open, `"strict"` проверяет planned open и close, `"off"` отключает проверку. |
+| `use_limit` | `false` | Если `true`, prime account открывается limit order вместо market order — это снижает fees. |
+| `first_as_prime` | `false` | Если `true`, первый аккаунт в списке всегда prime (limit-side). Если `false`, prime выбирается случайно каждый цикл. Игнорируется, если задан `group_size`. |
 
 ### Размер сделки
 
 Нужен ровно один из этих параметров — одновременно использовать оба нельзя.
 
-| Параметр         | По умолчанию | Описание                                                                                                                |
-| ---------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `trade_size_usd` | —       | Total notional за цикл в USD, диапазоном: `{ min = 140, max = 160 }`. Размер делится 50% prime / 50% hedge.                  |
-| `trade_size_pct` | —       | Размер как доля баланса аккаунта (например `0.5` = 50%). Ограничивающим становится самый тесный аккаунт.                      |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `trade_size_usd` | — | Total notional за цикл в USD, диапазоном: `{ min = 140, max = 160 }`. Размер делится 50% prime / 50% hedge. |
+| `trade_size_pct` | — | Размер как доля баланса аккаунта (например `0.5` = 50%). Ограничивающим становится самый тесный аккаунт. |
 
 ### Тайминги
 
 Durations принимают секунды (`30`), строки вроде `"15s"`, `"5m"`, `"1h"`, `"3d"`, составные строки вроде `"1d2h30m"` или диапазон `{ min = "15m", max = "20m" }`.
 
-| Параметр          | По умолчанию | Описание                                  |
-| ----------------- | -------- | -------------------------------------------- |
-| `trade_duration`  | required | Сколько держать позиции в каждом цикле.      |
-| `trade_cooldown`  | required | Пауза между циклами.                         |
-| `trade_heartbeat` | `"15s"`  | Как часто запускать safety checks во время удержания позиций. |
+| Параметр          | По умолчанию | Описание                                                      |
+| ----------------- | ------------ | ------------------------------------------------------------- |
+| `trade_duration`  | required     | Сколько держать позиции в каждом цикле.                       |
+| `trade_cooldown`  | required     | Пауза между циклами.                                          |
+| `trade_heartbeat` | `"15s"`      | Как часто запускать safety checks во время удержания позиций. |
 
 ### Limit order настройки
 
@@ -275,11 +270,11 @@ limit_wait_retries = 99
 limit_market_fallback = true
 ```
 
-| Параметр                | По умолчанию | Описание                                                                                                         |
-| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `limit_wait`            | `"90s"` | Сколько ждать fill limit order.                                                                                         |
-| `limit_wait_retries`    | `99`    | Дополнительные окна `limit_wait`, пока BBO остается близко к исходной limit price. `0` = отключено.                    |
-| `limit_market_fallback` | `true`  | Если limit order не исполнился вовремя, перейти на market order. `false` = прервать цикл.                              |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `limit_wait` | `"90s"` | Сколько ждать fill limit order. |
+| `limit_wait_retries` | `99` | Дополнительные окна `limit_wait`, пока BBO остается близко к исходной limit price. `0` = отключено. |
+| `limit_market_fallback` | `true` | Если limit order не исполнился вовремя, перейти на market order. `false` = прервать цикл. |
 
 Максимальное ожидание одного limit order: `limit_wait * (1 + limit_wait_retries)`. Большие значения повышают шанс maker fill, но требуют большего tradeability window перед открытием и закрытием позиций.
 
@@ -293,48 +288,48 @@ entry_gate_wait = "5m"
 entry_gate_poll = "3s"
 ```
 
-| Параметр               | По умолчанию | Описание                                                                   |
-| ---------------------- | ------- | -------------------------------------------------------------------------------- |
-| `max_entry_spread_pct` | `0.25`  | Максимальный расчетный entry spread/depth percent перед открытием позиции.       |
-| `entry_gate_wait`      | `"5m"`  | Максимальное время ожидания приемлемого entry quality перед skip.                |
-| `entry_gate_poll`      | `"3s"`  | Как часто перепроверять entry quality во время ожидания. Должно быть 1-10 секунд. |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `max_entry_spread_pct` | `0.25` | Максимальный расчетный entry spread/depth percent перед открытием позиции. |
+| `entry_gate_wait` | `"5m"` | Максимальное время ожидания приемлемого entry quality перед skip. |
+| `entry_gate_poll` | `"3s"` | Как часто перепроверять entry quality во время ожидания. Должно быть 1-10 секунд. |
 
 ### Лимиты безопасности
 
-| Параметр             | По умолчанию | Описание                                                                                                                                               |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `position_roi_limit` | `0.8`   | Аварийно закрыть весь цикл, если любая отдельная позиция достигла ±80% ROI.                                                                                    |
-| `combined_roi_limit` | `0.1`   | Аварийно закрыть, если combined basket ROI достиг ±10%.                                                                                                        |
-| `max_failures`       | `0`     | Остановить стратегию после такого числа подряд идущих cycle failures. `0` = не останавливать, повторять с exponential backoff до 1h между попытками.           |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `position_roi_limit` | `0.8` | Аварийно закрыть весь цикл, если любая отдельная позиция достигла ±80% ROI. |
+| `combined_roi_limit` | `0.1` | Аварийно закрыть, если combined basket ROI достиг ±10%. |
+| `max_failures` | `0` | Остановить стратегию после такого числа подряд идущих cycle failures. `0` = не останавливать, повторять с exponential backoff до 1h между попытками. |
 
 ### Групповая торговля
 
-| Параметр           | По умолчанию | Описание                                                                                           |
-| ------------------ | ------- | --------------------------------------------------------------------------------------------------------- |
-| `group_size`       | —       | Делит аккаунты на независимые группы. Должно быть 2-5. Число enabled accounts должно делиться на это число. |
-| `regroup_interval` | —       | Периодически сортирует accounts по балансу и перезапускает группы. Работает только при заданном `group_size`. |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `group_size` | — | Делит аккаунты на независимые группы. Должно быть 2-5. Число enabled accounts должно делиться на это число. |
+| `regroup_interval` | — | Периодически сортирует accounts по балансу и перезапускает группы. Работает только при заданном `group_size`. |
 
 ### Аккаунты
 
 Добавьте один блок `[[accounts]]` на каждый wallet.
 
-| Параметр  | По умолчанию | Описание                                                                 |
-| --------- | -------- | ------------------------------------------------------------------------------ |
-| `name`    | required | Имя для логов и stats.                                                         |
-| `privkey` | required | Приватный ключ. Заполните его, затем выполните `config encrypt`.               |
-| `proxy`   | —        | Опциональный HTTP proxy: `"http://user:pass@host:port"`.                       |
-| `enabled` | `true`   | `false` исключает аккаунт из торговли, но оставляет его в stats.               |
+| Параметр  | По умолчанию | Описание                                                         |
+| --------- | ------------ | ---------------------------------------------------------------- |
+| `name`    | required     | Имя для логов и stats.                                           |
+| `privkey` | required     | Приватный ключ. Заполните его, затем выполните `config encrypt`. |
+| `proxy`   | —            | Опциональный HTTP proxy: `"http://user:pass@host:port"`.         |
+| `enabled` | `true`       | `false` исключает аккаунт из торговли, но оставляет его в stats. |
 
 ### Telegram (опционально)
 
 Добавьте блок `[telegram]`, чтобы включить уведомления.
 
-| Параметр          | По умолчанию | Описание                                                                                                      |
-| ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `token`           | —            | Bot token от [@BotFather](https://t.me/BotFather). После добавления выполните `config encrypt`.                     |
-| `chat_id`         | —            | Ваш личный или групповой chat ID. Можно получить у [@userinfobot](https://t.me/userinfobot).                        |
-| `notify`          | all channels | Список каналов уведомлений: `"start"`, `"stop"`, `"errors"`, `"reports"`. Уберите ненужные, чтобы их заглушить.    |
-| `report_interval` | `"1h"`       | Как часто отправлять периодический stats digest.                                                                    |
+| Параметр | По умолчанию | Описание |
+| --- | --- | --- |
+| `token` | — | Bot token от [@BotFather](https://t.me/BotFather). После добавления выполните `config encrypt`. |
+| `chat_id` | — | Ваш личный или групповой chat ID. Можно получить у [@userinfobot](https://t.me/userinfobot). |
+| `notify` | all channels | Список каналов уведомлений: `"start"`, `"stop"`, `"errors"`, `"reports"`. Уберите ненужные, чтобы их заглушить. |
+| `report_interval` | `"1h"` | Как часто отправлять периодический stats digest. |
 
 ---
 
@@ -419,11 +414,11 @@ report_interval = "1h"
 
 **Каналы уведомлений:**
 
-| Канал     | Когда срабатывает                              |
-| --------- | ---------------------------------------------- |
-| `start`   | Открыт торговый цикл (symbol, size, accounts) |
-| `stop`    | Торговый цикл закрыт (PnL, duration)           |
-| `errors`  | Ошибки циклов и crashes                        |
+| Канал     | Когда срабатывает                                   |
+| --------- | --------------------------------------------------- |
+| `start`   | Открыт торговый цикл (symbol, size, accounts)       |
+| `stop`    | Торговый цикл закрыт (PnL, duration)                |
+| `errors`  | Ошибки циклов и crashes                             |
 | `reports` | Периодический digest (trades, volume, burn, $/100k) |
 
 Удалите channel из списка `notify`, чтобы отключить его.
@@ -504,12 +499,12 @@ Delta-farmer собирает анонимную usage statistics (exchange name
 
 ## Переменные окружения
 
-| Переменная                | Описание                                              |
-| ------------------------- | ----------------------------------------------------- |
-| `DF_CONFIG_PASSWORD`      | Пароль шифрования config для non-interactive runs.   |
+| Переменная                | Описание                                                        |
+| ------------------------- | --------------------------------------------------------------- |
+| `DF_CONFIG_PASSWORD`      | Пароль шифрования config для non-interactive runs.              |
 | `DF_LOG_FILE=1`           | Дополнительно писать trade logs в `logs/<timestamp>-<app>.log`. |
-| `DF_NO_UPDATE_NOTIFIER=1` | Отключить checks новых releases.                      |
-| `DF_TELEMETRY=0`          | Отключить anonymous usage telemetry.                  |
+| `DF_NO_UPDATE_NOTIFIER=1` | Отключить checks новых releases.                                |
+| `DF_TELEMETRY=0`          | Отключить anonymous usage telemetry.                            |
 
 ## Предупреждение о рисках
 

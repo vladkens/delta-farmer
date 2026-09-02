@@ -8,9 +8,7 @@
 
 <div align="center">
 
-[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127)
-[<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0)
-[<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
+[<img src="https://badges.ws/badge/-/%40uid127/000?icon=x&label" alt="x" />](https://x.com/uid127) [<img src="https://badges.ws/badge/-/Telegram%20Channel/2CA5E0?icon=telegram&label" alt="tg channel" />](https://t.me/+nkSWfo2QASdiOTI0) [<img src="https://badges.ws/badge/-/Telegram%20Chat/2CA5E0?icon=telegram&label" alt="tg chat" />](https://t.me/+JPqp0bteCWwzMDJk)
 
 </div>
 
@@ -44,16 +42,15 @@ Delta-farmer автоматично відкриває узгоджені long �
 
 ## Підтримувані біржі
 
-| Назва    | Мережа  | Посилання                                    | Referral                                                           |
-| -------- | ------- | --------------------------------------------- | ------------------------------------------------------------------ |
-| Ethereal | EVM     | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X)            |
-| HyENA    | EVM     | [hyena.trade](https://app.hyena.trade/)       | [Sign up](https://app.hyena.trade/ref/VLADKENS)                    |
-| Nado     | EVM     | [nado.xyz](https://app.nado.xyz/)             | [Sign up](https://app.nado.xyz?join=yUAjz7a)                       |
-| Omni     | EVM     | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io)                             |
-| Onyx     | EVM     | [onyx.live](https://app.onyx.live/)           | [Sign up](https://app.onyx.live/?ref=BB7M4BW3)                     |
-| Pacifica | Solana  | [pacifica.fi](https://app.pacifica.fi)        | [Sign up](https://app.pacifica.fi?referral=uid127)                 |
-| RiseX    | EVM     | [rise.trade](https://www.rise.trade/)         | [Sign up](https://www.rise.trade/)                                 |
-| N1       | EVM     | [n1.xyz](https://app.n1.xyz/)                 | [Sign up](https://app.n1.xyz/r/vladkens)                           |
+| Назва | Мережа | Посилання | Referral |
+| --- | --- | --- | --- |
+| Ethereal | EVM | [ethereal.trade](https://app.ethereal.trade/) | [Sign up](https://app.ethereal.trade/?ref=DSQ3BOJ65L3X) |
+| HyENA | EVM | [hyena.trade](https://app.hyena.trade/) | [Sign up](https://app.hyena.trade/ref/VLADKENS) |
+| Nado | EVM | [nado.xyz](https://app.nado.xyz/) | [Sign up](https://app.nado.xyz?join=yUAjz7a) |
+| Omni | EVM | [variational.io](https://omni.variational.io) | [Sign up](https://omni.variational.io) |
+| Pacifica | Solana | [pacifica.fi](https://app.pacifica.fi) | [Sign up](https://app.pacifica.fi?referral=uid127) |
+| RiseX | EVM | [rise.trade](https://www.rise.trade/) | [Sign up](https://www.rise.trade/) |
+| N1 | EVM | [n1.xyz](https://app.n1.xyz/) | [Sign up](https://app.n1.xyz/r/vladkens) |
 
 ### Оновлення бірж
 
@@ -110,7 +107,7 @@ cd delta-farmer
 
 ## Швидкий старт
 
-Усюди нижче замінюйте `<app>` на назву exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `onyx`, `rise` або `n1`.
+Усюди нижче замінюйте `<app>` на назву exchange: `pacifica`, `omni`, `ethereal`, `nado`, `hyena`, `rise` або `n1`.
 
 **Крок 1 — створіть config**
 
@@ -186,8 +183,7 @@ uv run apps/<app>.py --help
 
 ### Логи
 
-За замовчуванням логи виводяться тільки в термінал. Для торгових запусків встановіть
-`DF_LOG_FILE=1`, щоб додатково писати логи в `logs/<timestamp>-<app>.log`:
+За замовчуванням логи виводяться тільки в термінал. Для торгових запусків встановіть `DF_LOG_FILE=1`, щоб додатково писати логи в `logs/<timestamp>-<app>.log`:
 
 ```bash
 DF_LOG_FILE=1 uv run apps/<app>.py trade
@@ -219,10 +215,9 @@ uv run apps/omni.py competition              # Показати статус Omn
 uv run apps/omni.py competition --join       # Зареєструвати всі налаштовані Omni accounts
 uv run apps/hyena.py reward claim            # Забрати Hyena rewards
 uv run apps/hyena.py migrate                 # Перевести Hyena HyperLiquid accounts в unified mode
-uv run apps/onyx.py migrate                  # Перевести Onyx HyperLiquid accounts в unified mode
 ```
 
-Команди Omni competition показують активне вікно турніру, статус участі, eligibility volume і місця в leaderboard. Команди Hyena та Onyx `migrate` переводять HyperLiquid-backed акаунти в Unified Account mode, якщо exchange повідомляє legacy account mode.
+Команди Omni competition показують активне вікно турніру, статус участі, eligibility volume і місця в leaderboard. Команда Hyena `migrate` переводить HyperLiquid-backed акаунти в Unified Account mode, якщо exchange повідомляє legacy account mode.
 
 ### Проблеми зі входом в Omni
 
@@ -236,33 +231,33 @@ uv run apps/onyx.py migrate                  # Перевести Onyx HyperLiqu
 
 ### Основні налаштування
 
-| Параметр           | За замовчуванням | Опис                                                                                                                                                   |
-| ------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `leverage`          | `10`     | Множник leverage (1-49). Ставте **мінімальний** max leverage серед вибраних symbols.                                                                           |
-| `symbols`           | required | Торгові пари, наприклад `["BTC"]` або `["BTC", "ETH"]`. Доступні symbols перевіряйте в UI exchange.                                                           |
-| `symbols_per_trade` | `1`      | Скільки symbols торгувати за цикл. `1` = classic mode і може вибирати один symbol зі списку; `2`-`4` = basket mode і має збігатися з довжиною `symbols`.        |
-| `market_hours`      | `"auto"` | Режим market-hours pre-check: `"auto"` перевіряє тільки planned open, `"strict"` перевіряє planned open і close, `"off"` вимикає перевірку.                    |
-| `use_limit`         | `false`  | Якщо `true`, prime account відкривається limit order замість market order — це знижує fees.                                                                    |
-| `first_as_prime`    | `false`  | Якщо `true`, перший акаунт у списку завжди prime (limit-side). Якщо `false`, prime вибирається випадково кожен цикл. Ігнорується, якщо задано `group_size`.     |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `leverage` | `10` | Множник leverage (1-49). Ставте **мінімальний** max leverage серед вибраних symbols. |
+| `symbols` | required | Торгові пари, наприклад `["BTC"]` або `["BTC", "ETH"]`. Доступні symbols перевіряйте в UI exchange. |
+| `symbols_per_trade` | `1` | Скільки symbols торгувати за цикл. `1` = classic mode і може вибирати один symbol зі списку; `2`-`4` = basket mode і має збігатися з довжиною `symbols`. |
+| `market_hours` | `"auto"` | Режим market-hours pre-check: `"auto"` перевіряє тільки planned open, `"strict"` перевіряє planned open і close, `"off"` вимикає перевірку. |
+| `use_limit` | `false` | Якщо `true`, prime account відкривається limit order замість market order — це знижує fees. |
+| `first_as_prime` | `false` | Якщо `true`, перший акаунт у списку завжди prime (limit-side). Якщо `false`, prime вибирається випадково кожен цикл. Ігнорується, якщо задано `group_size`. |
 
 ### Розмір угоди
 
 Потрібен рівно один із цих параметрів — одночасно використовувати обидва не можна.
 
-| Параметр         | За замовчуванням | Опис                                                                                                                   |
-| ---------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `trade_size_usd` | —       | Total notional за цикл у USD, діапазоном: `{ min = 140, max = 160 }`. Розмір ділиться 50% prime / 50% hedge.                 |
-| `trade_size_pct` | —       | Розмір як частка балансу акаунта (наприклад `0.5` = 50%). Обмежувальним стає найтісніший акаунт.                             |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `trade_size_usd` | — | Total notional за цикл у USD, діапазоном: `{ min = 140, max = 160 }`. Розмір ділиться 50% prime / 50% hedge. |
+| `trade_size_pct` | — | Розмір як частка балансу акаунта (наприклад `0.5` = 50%). Обмежувальним стає найтісніший акаунт. |
 
 ### Таймінги
 
 Durations приймають секунди (`30`), рядки на кшталт `"15s"`, `"5m"`, `"1h"`, `"3d"`, складені рядки на кшталт `"1d2h30m"` або діапазон `{ min = "15m", max = "20m" }`.
 
-| Параметр          | За замовчуванням | Опис                                  |
-| ----------------- | -------- | -------------------------------------------- |
-| `trade_duration`  | required | Скільки тримати позиції в кожному циклі.     |
-| `trade_cooldown`  | required | Пауза між циклами.                           |
-| `trade_heartbeat` | `"15s"`  | Як часто запускати safety checks під час утримання позицій. |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `trade_duration` | required | Скільки тримати позиції в кожному циклі. |
+| `trade_cooldown` | required | Пауза між циклами. |
+| `trade_heartbeat` | `"15s"` | Як часто запускати safety checks під час утримання позицій. |
 
 ### Limit order налаштування
 
@@ -275,11 +270,11 @@ limit_wait_retries = 99
 limit_market_fallback = true
 ```
 
-| Параметр                | За замовчуванням | Опис                                                                                                      |
-| ----------------------- | ------- | --------------------------------------------------------------------------------------------------------------------- |
-| `limit_wait`            | `"90s"` | Скільки чекати fill limit order.                                                                                      |
-| `limit_wait_retries`    | `99`    | Додаткові вікна `limit_wait`, доки BBO залишається близько до початкової limit price. `0` = вимкнено.                |
-| `limit_market_fallback` | `true`  | Якщо limit order не виконався вчасно, перейти на market order. `false` = перервати цикл.                             |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `limit_wait` | `"90s"` | Скільки чекати fill limit order. |
+| `limit_wait_retries` | `99` | Додаткові вікна `limit_wait`, доки BBO залишається близько до початкової limit price. `0` = вимкнено. |
+| `limit_market_fallback` | `true` | Якщо limit order не виконався вчасно, перейти на market order. `false` = перервати цикл. |
 
 Максимальне очікування одного limit order: `limit_wait * (1 + limit_wait_retries)`. Більші значення підвищують шанс maker fill, але потребують більшого tradeability window перед відкриттям і закриттям позицій.
 
@@ -293,48 +288,48 @@ entry_gate_wait = "5m"
 entry_gate_poll = "3s"
 ```
 
-| Параметр               | За замовчуванням | Опис                                                                     |
-| ---------------------- | ------- | ---------------------------------------------------------------------------------- |
-| `max_entry_spread_pct` | `0.25`  | Максимальний розрахунковий entry spread/depth percent перед відкриттям позиції.    |
-| `entry_gate_wait`      | `"5m"`  | Максимальний час очікування прийнятного entry quality перед skip.                  |
-| `entry_gate_poll`      | `"3s"`  | Як часто повторно перевіряти entry quality під час очікування. Має бути 1-10 секунд. |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `max_entry_spread_pct` | `0.25` | Максимальний розрахунковий entry spread/depth percent перед відкриттям позиції. |
+| `entry_gate_wait` | `"5m"` | Максимальний час очікування прийнятного entry quality перед skip. |
+| `entry_gate_poll` | `"3s"` | Як часто повторно перевіряти entry quality під час очікування. Має бути 1-10 секунд. |
 
 ### Ліміти безпеки
 
-| Параметр             | За замовчуванням | Опис                                                                                                                                           |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `position_roi_limit` | `0.8`   | Аварійно закрити весь цикл, якщо будь-яка окрема позиція досягла ±80% ROI.                                                                                     |
-| `combined_roi_limit` | `0.1`   | Аварійно закрити, якщо combined basket ROI досяг ±10%.                                                                                                         |
-| `max_failures`       | `0`     | Зупинити стратегію після такої кількості поспіль cycle failures. `0` = не зупиняти, повторювати з exponential backoff до 1h між спробами.                      |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `position_roi_limit` | `0.8` | Аварійно закрити весь цикл, якщо будь-яка окрема позиція досягла ±80% ROI. |
+| `combined_roi_limit` | `0.1` | Аварійно закрити, якщо combined basket ROI досяг ±10%. |
+| `max_failures` | `0` | Зупинити стратегію після такої кількості поспіль cycle failures. `0` = не зупиняти, повторювати з exponential backoff до 1h між спробами. |
 
 ### Групова торгівля
 
-| Параметр           | За замовчуванням | Опис                                                                                         |
-| ------------------ | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `group_size`       | —       | Ділить акаунти на незалежні групи. Має бути 2-5. Кількість enabled accounts має ділитися на це число.       |
-| `regroup_interval` | —       | Періодично сортує accounts за балансом і перезапускає групи. Працює тільки при заданому `group_size`.       |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `group_size` | — | Ділить акаунти на незалежні групи. Має бути 2-5. Кількість enabled accounts має ділитися на це число. |
+| `regroup_interval` | — | Періодично сортує accounts за балансом і перезапускає групи. Працює тільки при заданому `group_size`. |
 
 ### Акаунти
 
 Додайте один блок `[[accounts]]` на кожен wallet.
 
-| Параметр  | За замовчуванням | Опис                                                                 |
-| --------- | -------- | ------------------------------------------------------------------------------ |
-| `name`    | required | Ім'я для логів і stats.                                                        |
-| `privkey` | required | Приватний ключ. Заповніть його, потім виконайте `config encrypt`.              |
-| `proxy`   | —        | Опціональний HTTP proxy: `"http://user:pass@host:port"`.                       |
-| `enabled` | `true`   | `false` виключає акаунт із торгівлі, але залишає його в stats.                 |
+| Параметр  | За замовчуванням | Опис                                                              |
+| --------- | ---------------- | ----------------------------------------------------------------- |
+| `name`    | required         | Ім'я для логів і stats.                                           |
+| `privkey` | required         | Приватний ключ. Заповніть його, потім виконайте `config encrypt`. |
+| `proxy`   | —                | Опціональний HTTP proxy: `"http://user:pass@host:port"`.          |
+| `enabled` | `true`           | `false` виключає акаунт із торгівлі, але залишає його в stats.    |
 
 ### Telegram (опціонально)
 
 Додайте блок `[telegram]`, щоб увімкнути сповіщення.
 
-| Параметр          | За замовчуванням | Опис                                                                                                  |
-| ----------------- | ------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `token`           | —            | Bot token від [@BotFather](https://t.me/BotFather). Після додавання виконайте `config encrypt`.                    |
-| `chat_id`         | —            | Ваш особистий або груповий chat ID. Можна отримати у [@userinfobot](https://t.me/userinfobot).                     |
-| `notify`          | all channels | Список каналів сповіщень: `"start"`, `"stop"`, `"errors"`, `"reports"`. Приберіть непотрібні, щоб їх вимкнути.     |
-| `report_interval` | `"1h"`       | Як часто надсилати періодичний stats digest.                                                                       |
+| Параметр | За замовчуванням | Опис |
+| --- | --- | --- |
+| `token` | — | Bot token від [@BotFather](https://t.me/BotFather). Після додавання виконайте `config encrypt`. |
+| `chat_id` | — | Ваш особистий або груповий chat ID. Можна отримати у [@userinfobot](https://t.me/userinfobot). |
+| `notify` | all channels | Список каналів сповіщень: `"start"`, `"stop"`, `"errors"`, `"reports"`. Приберіть непотрібні, щоб їх вимкнути. |
+| `report_interval` | `"1h"` | Як часто надсилати періодичний stats digest. |
 
 ---
 
@@ -419,11 +414,11 @@ report_interval = "1h"
 
 **Канали сповіщень:**
 
-| Канал     | Коли спрацьовує                               |
-| --------- | --------------------------------------------- |
-| `start`   | Відкрито торговий цикл (symbol, size, accounts) |
-| `stop`    | Торговий цикл закрито (PnL, duration)         |
-| `errors`  | Помилки циклів і crashes                      |
+| Канал     | Коли спрацьовує                                   |
+| --------- | ------------------------------------------------- |
+| `start`   | Відкрито торговий цикл (symbol, size, accounts)   |
+| `stop`    | Торговий цикл закрито (PnL, duration)             |
+| `errors`  | Помилки циклів і crashes                          |
 | `reports` | Періодичний digest (trades, volume, burn, $/100k) |
 
 Видаліть channel зі списку `notify`, щоб вимкнути його.
@@ -504,12 +499,12 @@ Delta-farmer збирає анонімну usage statistics (exchange name, comm
 
 ## Змінні оточення
 
-| Змінна                    | Опис                                                  |
-| ------------------------- | ----------------------------------------------------- |
-| `DF_CONFIG_PASSWORD`      | Пароль шифрування config для non-interactive runs.   |
+| Змінна                    | Опис                                                        |
+| ------------------------- | ----------------------------------------------------------- |
+| `DF_CONFIG_PASSWORD`      | Пароль шифрування config для non-interactive runs.          |
 | `DF_LOG_FILE=1`           | Додатково писати trade logs у `logs/<timestamp>-<app>.log`. |
-| `DF_NO_UPDATE_NOTIFIER=1` | Вимкнути checks нових releases.                       |
-| `DF_TELEMETRY=0`          | Вимкнути anonymous usage telemetry.                   |
+| `DF_NO_UPDATE_NOTIFIER=1` | Вимкнути checks нових releases.                             |
+| `DF_TELEMETRY=0`          | Вимкнути anonymous usage telemetry.                         |
 
 ## Попередження про ризики
 

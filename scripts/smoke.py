@@ -237,7 +237,6 @@ async def main():
         "hyperliquid",
         "nado",
         "omni",
-        "onyx",
         "pacifica",
         "rise",
         "n1",
@@ -268,7 +267,6 @@ async def main():
     from clients.n1 import N1Client
     from clients.nado import NadoClient
     from clients.omni import OmniClient
-    from clients.onyx import OnyxClient
     from clients.pacifica import PacificaClient
     from clients.rise import RiseClient
     from strategy import StrategyConfig
@@ -279,7 +277,6 @@ async def main():
         "hyperliquid": HyperLiquidNativeClient,
         "nado": NadoClient,
         "omni": OmniClient,
-        "onyx": OnyxClient,
         "pacifica": PacificaClient,
         "rise": RiseClient,
         "n1": N1Client,
