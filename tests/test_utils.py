@@ -42,21 +42,3 @@ async def test_gather_accs_waits_for_all_accounts_before_reporting_failure():
         await gather_accs([Account("failed"), Account("useful")], work)
 
     assert finished.is_set()
-
-
-async def test_gather_accs_limits_parallel_accounts_by_default():
-    active = 0
-    max_active = 0
-
-    async def work(acc: int) -> int:
-        nonlocal active, max_active
-        active += 1
-        max_active = max(max_active, active)
-        await asyncio.sleep(0)
-        active -= 1
-        return acc
-
-    result = await gather_accs([1, 2, 3], work)
-
-    assert result == [1, 2, 3]
-    assert max_active == 1

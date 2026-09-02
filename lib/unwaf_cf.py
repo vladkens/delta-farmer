@@ -348,6 +348,17 @@ async def solve_managed_cf_clearance(
             f"{solver_api}/createTask", json={"clientKey": api_key, "task": task}
         )
         res = rep.json()
+        if res.get("errorCode") == "NO_FUNDS":
+            if api_key:
+                raise RuntimeError(
+                    "Your Astrum account is out of funds. Top it up: "
+                    "https://solver.astrum.foundation/"
+                )
+            raise RuntimeError(
+                "Shared Cloudflare solver is out of funds. Report it at "
+                "https://t.me/eazyrekt or configure your own Astrum captcha_key: "
+                "https://solver.astrum.foundation/"
+            )
         if res.get("errorId", 0) != 0 or not res.get("taskId"):
             raise RuntimeError(f"Cloudflare task creation failed: {res}")
 

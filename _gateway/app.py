@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -10,6 +11,27 @@ ASTRUM_API = "https://solver.astrum.foundation/api"
 OMNI_HOST = "omni.variational.io"
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def add_legacy_token(content: bytes) -> bytes:
+    try:
+        result = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return content
+
+    if not isinstance(result, dict):
+        return content
+
+    solution = result.get("solution")
+    if not isinstance(solution, dict) or solution.get("token"):
+        return content
+
+    cookies = solution.get("cookies")
+    if not isinstance(cookies, dict) or not (token := cookies.get("cf_clearance")):
+        return content
+
+    solution["token"] = token
+    return json.dumps(result, separators=(",", ":")).encode()
 
 
 def get_task(payload: dict[str, Any]) -> dict[str, Any]:
@@ -37,8 +59,9 @@ async def proxy(path: str, task: dict[str, Any]) -> Response:
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         upstream = await client.post(f"{ASTRUM_API}/{path}", json=payload)
 
+    content = add_legacy_token(upstream.content) if path == "getTaskResult" else upstream.content
     return Response(
-        content=upstream.content,
+        content=content,
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type", "application/json"),
     )

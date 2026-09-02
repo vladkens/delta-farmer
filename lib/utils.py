@@ -17,14 +17,14 @@ from filelock import FileLock
 from .errors import AppError
 from .logger import logger
 
-GATHER_ACCS_LIMIT = 1
+ACCOUNTS_CONCURRENCY = max(1, int(os.getenv("DF_ACCOUNTS_CONCURRENCY", "3")))
 
 
 async def gather_accs[T, R](
     accs: list[T],
     fn: Callable[[T], Awaitable[R]],
     *,
-    limit=GATHER_ACCS_LIMIT,
+    limit=ACCOUNTS_CONCURRENCY,
 ) -> list[R]:
     if limit < 1:
         raise ValueError("Account concurrency limit must be at least 1")
