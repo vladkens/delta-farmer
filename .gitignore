@@ -10,5 +10,6 @@ __pycache__/
 *.har
 *.pyc
 *.txt
+3rd/
 configs/
 logs/

@@ -62,7 +62,7 @@ login:
 
 # --- Deploy ---
 
-.PHONY: deploy logs
+.PHONY: deploy deploy-gw
 
 HOST=lab
 EXEC=ssh -tt $(HOST)
@@ -77,15 +77,5 @@ deploy:
 	$(SYNC) ./ $(HOST):$(DDIR)
 	$(EXEC) "cd $(DDIR) && $(UV) sync --locked"
 
-logs:
-	@$(EXEC) 'cd $(DDIR) && \
-		command -v fzf >/dev/null || { echo "fzf is required on $(HOST)"; exit 127; }; \
-		ls -1t logs/*.log 2>/dev/null | \
-		fzf \
-			--exit-0 \
-			--no-sort \
-			--prompt="logs> " \
-			--preview="tail -n \$$FZF_PREVIEW_LINES -- {}" \
-			--preview-window=down:60% \
-			--bind="enter:execute(less +G -- {})" \
-			--bind="ctrl-r:reload(ls -1t logs/*.log 2>/dev/null)"'
+deploy-gw:
+	cd _gateway && fly deploy --ha=false
