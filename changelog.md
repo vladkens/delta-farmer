@@ -1,3 +1,18 @@
+## v0.9.1 – 2026-09-04
+
+### Features
+
+- Added trading support for Omni swap markets.
+
+### Improvements
+
+- Added clear shutdown progress messages while open positions are being closed.
+- Improved shared CAPTCHA solver reliability by limiting concurrent tasks per client.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.9.0...v0.9.1
+
+---
+
 ## v0.9.0 – 2026-09-02
 
 ### Breaking Changes
