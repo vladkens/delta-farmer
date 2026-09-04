@@ -1061,10 +1061,12 @@ async def test_cycle_skips_all_opens_when_any_gate_blocks(monkeypatch):
     assert close_calls == []
 
 
-async def test_loop_closes_all_on_startup():
+async def test_loop_reports_shutdown_cleanup(monkeypatch):
     a, b = MockClient("a"), MockClient("b")
     stop = asyncio.Event()
     strategy = DeltaStrategy(make_cfg(), [a, b], stop_event=stop)
+    messages: list[str] = []
+    monkeypatch.setattr("strategy.cycle.logger.info", messages.append)
 
     async def stop_after_cleanup():
         for _ in range(50):
@@ -1081,6 +1083,8 @@ async def test_loop_closes_all_on_startup():
         pass
 
     assert "cancel_all_orders" in a.calls
+    assert any(message.startswith("Stop requested, closing all positions") for message in messages)
+    assert "Shutdown cleanup complete" in messages
 
 
 async def test_loop_closes_all_on_exception():

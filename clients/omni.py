@@ -270,20 +270,21 @@ class OmniClient:
     async def _instrument(self, symbol: str) -> dict[str, Any]:
         assets = await self.supported_assets()
         asset = assets.get(symbol)
-        if asset and asset.instrument_type == "perpetual_rwa_future":
-            return {
-                "underlying": symbol,
-                "settlement_asset": "USDC",
-                "instrument_type": "perpetual_rwa_future",
-                "kind": asset.asset_class,
-            }
-
-        return {
+        instrument_type = (
+            asset.instrument_type if asset and asset.instrument_type else "perpetual_future"
+        )
+        instrument = {
             "underlying": symbol,
-            "funding_interval_s": 3600,
             "settlement_asset": "USDC",
-            "instrument_type": "perpetual_future",
+            "instrument_type": instrument_type,
         }
+        if instrument_type == "swap":
+            instrument["funding_interval_s"] = 0
+        elif instrument_type == "perpetual_future":
+            instrument["funding_interval_s"] = 3600
+        if asset and asset.asset_class:
+            instrument["kind"] = asset.asset_class
+        return instrument
 
     async def get_symbols(self) -> list[str]:
         assets = await self.supported_assets()

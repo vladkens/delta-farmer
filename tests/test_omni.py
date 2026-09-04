@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from clients.omni import CloudflareClearanceUpdated, OmniClient
+from clients.omni import CloudflareClearanceUpdated, OmniClient, OmniSupportedAsset
 from lib.http import ApiError, AsyncHttp
 
 
@@ -172,6 +172,63 @@ async def test_call_relogs_only_once(client):
 
     client.login.assert_awaited_once_with()
     assert client._request.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("asset", "expected"),
+    [
+        (
+            OmniSupportedAsset(asset="BTC", has_perp=True, instrument_type="perpetual_future"),
+            {
+                "underlying": "BTC",
+                "settlement_asset": "USDC",
+                "instrument_type": "perpetual_future",
+                "funding_interval_s": 3600,
+            },
+        ),
+        (
+            OmniSupportedAsset(
+                asset="ANTHROPIC",
+                has_perp=True,
+                instrument_type="perpetual_rwa_future",
+                asset_class="equity",
+            ),
+            {
+                "underlying": "ANTHROPIC",
+                "settlement_asset": "USDC",
+                "instrument_type": "perpetual_rwa_future",
+                "kind": "equity",
+            },
+        ),
+        (
+            OmniSupportedAsset(
+                asset="XAUS", has_perp=True, instrument_type="swap", asset_class="commodity"
+            ),
+            {
+                "underlying": "XAUS",
+                "settlement_asset": "USDC",
+                "instrument_type": "swap",
+                "funding_interval_s": 0,
+                "kind": "commodity",
+            },
+        ),
+    ],
+)
+async def test_instrument_uses_supported_asset_metadata(client, asset, expected):
+    client.supported_assets = AsyncMock(return_value={asset.asset: asset})
+
+    assert await client._instrument(asset.asset) == expected
+
+
+async def test_instrument_defaults_unknown_symbol_to_crypto_perp(client):
+    client.supported_assets = AsyncMock(return_value={})
+
+    assert await client._instrument("BTC") == {
+        "underlying": "BTC",
+        "settlement_asset": "USDC",
+        "instrument_type": "perpetual_future",
+        "funding_interval_s": 3600,
+    }
 
 
 async def test_concurrent_unauthorized_calls_share_one_authentication(client):

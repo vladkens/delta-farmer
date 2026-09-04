@@ -133,7 +133,11 @@ class DeltaStrategy:
                 failures = 0
                 await self._wait(self.cfg.trade_cooldown.sample())
             except asyncio.CancelledError:  # stop_event triggered, time to exit
+                logger.info(
+                    "Stop requested, closing all positions; press Ctrl-C again only to force exit"
+                )
                 await close_all(self.accounts)
+                logger.info("Shutdown cleanup complete")
                 return
             except Exception as e:
                 await close_all(self.accounts)
