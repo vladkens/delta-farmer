@@ -7,7 +7,7 @@ import asyncio
 import glob
 import sys
 import time
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from lib.utils import round_to_tick_size
 from strategy import TradingClient, usd_to_qty
@@ -168,7 +168,9 @@ async def smoke(client: TradingClient, symbol: str, size_usd: float) -> tuple[in
 
     # Place bid 10% below mid — won't fill in the few seconds before cancel.
     limit_px = round_to_tick_size(price * Decimal("0.9"), tick)
-    limit_qty = usd_to_qty(Decimal(str(size_usd)), limit_px, lot)
+    limit_qty = (Decimal(str(size_usd)) / limit_px / lot).to_integral_value(
+        rounding=ROUND_CEILING
+    ) * lot
     lorder = None
 
     try:
@@ -235,6 +237,7 @@ async def main():
         "ethereal",
         "hyena",
         "hyperliquid",
+        "lighter",
         "nado",
         "omni",
         "pacifica",
@@ -264,6 +267,7 @@ async def main():
     from apps.hyperliquid import HyperLiquidNativeClient
     from clients.ethereal import EtherealClient
     from clients.hyena import HyenaClient
+    from clients.lighter import LighterClient
     from clients.n1 import N1Client
     from clients.nado import NadoClient
     from clients.omni import OmniClient
@@ -275,6 +279,7 @@ async def main():
         "ethereal": EtherealClient,
         "hyena": HyenaClient,
         "hyperliquid": HyperLiquidNativeClient,
+        "lighter": LighterClient,
         "nado": NadoClient,
         "omni": OmniClient,
         "pacifica": PacificaClient,
