@@ -241,12 +241,22 @@ class LighterClient:
         }
         res = await self._call("GET", "/api/v1/pnl", params=pld, headers=hdr)
         history: list[dict] = res["pnl"]
-        pnl = Decimal(0)
-        if len(history) > 1:
-            first_pnl = Decimal(str(history[0]["trade_pnl"]))
-            last_pnl = Decimal(str(history[-1]["trade_pnl"]))
-            pnl = last_pnl - first_pnl
-        return pnl
+        if not history:
+            # TODO: Replace this once current PnL is available without chart fallbacks.
+            # Robinhood Lighter does not publish the daily rollup on an account's first day.
+            pld["resolution"] = "1h"
+            pld["start_timestamp"] = max(
+                VOLUME_START_TIMESTAMP, pld["end_timestamp"] - 7 * 24 * 60 * 60
+            )
+            res = await self._call("GET", "/api/v1/pnl", params=pld, headers=hdr)
+            history = res["pnl"]
+
+        if not history:
+            return Decimal(0)
+
+        first = Decimal(str(history[0]["trade_pnl"]))
+        last = Decimal(str(history[-1]["trade_pnl"]))
+        return last - first
 
     async def _get_used_referral_code(self, account_index: int) -> str | None:
         hdr = self._get_auth_headers(account_index)
@@ -574,6 +584,7 @@ class LighterClient:
     async def deposit(self, amount: Decimal) -> str:
         info = await self.deposit_network()
         amount = deposit_amount(amount, info.token.decimals, info.min_amount)
+        logger.info(f"Deposit {amount:,.2f} {info.token.symbol}")
         amount_units = to_token_units(amount, info.token)
         balance = await self.deposit_balance()
         call = make_call(
@@ -595,6 +606,7 @@ class LighterClient:
         logger.info(f"Deposit tx: {tx_hash}; fee: {fee:,.8f} ETH")
         logger.info("Deposit tx confirmed; waiting for credit")
         await wait_for_deposit_credit(self, balance + amount, tx_hash)
+        logger.success(f"Deposit credited: {info.network.tx_url(tx_hash)}")
 
         return tx_hash
 

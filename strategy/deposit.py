@@ -108,7 +108,7 @@ async def wait_for_deposit_credit(
     raise ApiError(f"{account.exchange.title()} deposit credit timed out: {reference}")
 
 
-def _random_target(cfg: DepositConfig) -> Decimal:
+def balance_target(cfg: DepositConfig) -> Decimal:
     assert cfg.deposit_target is not None
     spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
     if not spread:
@@ -125,7 +125,7 @@ def _make_plan[T: DepositClient](
     balances: DepositBalances,
     minimum: Decimal,
 ) -> DepositPlanItem[T]:
-    random_target = _random_target(cfg)
+    random_target = balance_target(cfg)
     assert cfg.deposit_target is not None
     spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
     maximum_target = cfg.deposit_target + spread
@@ -256,9 +256,7 @@ async def run_deposits[T: DepositClient](
     await asyncio.sleep(DEPOSIT_START_DELAY_SEC)
     print("-" * 60)
     for index, row in enumerate(plan):
-        logger.info(f"Deposit {row.amount:,.2f} {asset.token.symbol}: {row.account.name}")
         await row.account.deposit(row.amount)
-        logger.success(f"Deposit credited: {row.account.name}")
         if index < len(plan) - 1:
             wait = cfg.deposit_delay.sample()
             logger.info(f"Waiting {format_duration(wait)} before next deposit")

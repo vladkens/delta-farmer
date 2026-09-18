@@ -12,6 +12,7 @@ from pydantic import Field, SecretStr
 
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
 from lib.cli import create_cli, create_clients, run_app
+from lib.errors import AppError
 from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -19,6 +20,7 @@ from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups
+from strategy.withdrawal import run_withdrawals
 
 
 class OmniConfig(DepositConfig):
@@ -147,6 +149,32 @@ def setup_competition_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--join", action="store_true", help="Join competition with all accounts")
 
 
+def setup_account_cli(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-a", "--account", metavar="NAME", help="Run for one enabled account")
+
+
+def setup_withdraw_cli(parser: argparse.ArgumentParser) -> None:
+    setup_account_cli(parser)
+    parser.add_argument("--full", action="store_true", help="Withdraw the full balance")
+
+
+def _select_account(
+    all_accs: list[OmniClient],
+    act_accs: list[OmniClient],
+    name: str | None,
+) -> list[OmniClient]:
+    if name is None:
+        return act_accs
+
+    account = next((acc for acc in all_accs if acc.name == name), None)
+    if account is None:
+        raise AppError(f"Account not found: {name}")
+    if account not in act_accs:
+        raise AppError(f"Account is disabled: {name}")
+
+    return [account]
+
+
 CompetitionRow = tuple[OmniClient, OmniCompetitionStatus | None, str | None]
 
 
@@ -244,7 +272,11 @@ async def main():
         "omni",
         "configs/omni.toml",
         ["privkey", "captcha_key"],
-        custom_commands={"competition": setup_competition_cli, "deposit": lambda _: None},
+        custom_commands={
+            "competition": setup_competition_cli,
+            "deposit": setup_account_cli,
+            "withdraw": setup_withdraw_cli,
+        },
     )
     cfg = OmniConfig.load(cli.config)
     if key := cfg.captcha_key.get_secret_value():
@@ -269,7 +301,15 @@ async def main():
             else:
                 await print_competition_status(all_accs)
         case "deposit":
-            await run_deposits(act_accs, cfg)
+            accounts = _select_account(all_accs, act_accs, getattr(cli, "account", None))
+            await run_deposits(accounts, cfg)
+        case "withdraw":
+            accounts = _select_account(all_accs, act_accs, getattr(cli, "account", None))
+            await run_withdrawals(
+                accounts,
+                cfg,
+                withdraw_full=cli.full,
+            )
 
 
 if __name__ == "__main__":

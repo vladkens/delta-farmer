@@ -5,7 +5,7 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from eth_account.messages import encode_defunct, encode_typed_data
 from pydantic import AliasPath, BaseModel, ConfigDict, Field
@@ -38,6 +38,11 @@ from strategy.deposit import (
     deposit_amount,
 )
 from strategy.execution import EntryQuality
+from strategy.withdrawal import (
+    WithdrawalInfo,
+    withdrawal_amount,
+    withdrawal_limit,
+)
 
 API_URL = "https://omni.variational.io/api"
 APP_URL = "https://omni.variational.io"
@@ -108,6 +113,15 @@ class OmniOrder(BaseModel):
     price: Decimal | None = None  # execution price (present when cleared)
 
 
+class OmniTransfer(BaseModel):
+    id: str
+    status: str
+    confirmed_by_transaction_id: str | None = Field(
+        default=None,
+        pattern=r"^0x[0-9a-fA-F]{64}$",
+    )
+
+
 class OmniPosition(BaseModel):
     model_config = ConfigDict(validate_by_name=True, validate_by_alias=True)
     symbol: str = Field(validation_alias=AliasPath("position_info", "instrument", "underlying"))
@@ -149,9 +163,19 @@ class OmniSettlementPool(BaseModel):
     pool_address: str
 
 
+class OmniMetadataConfig(BaseModel):
+    transfer_fee: Decimal = Field(ge=0, allow_inf_nan=False)
+
+
 class OmniPoolDetails(BaseModel):
-    balance: Decimal
-    max_withdrawable_amount: Decimal
+    balance: Decimal = Field(allow_inf_nan=False)
+    max_withdrawable_amount: Decimal = Field(ge=0, allow_inf_nan=False)
+    withdrawal_fee: Decimal = Field(default=Decimal(0), ge=0, allow_inf_nan=False)
+
+    @classmethod
+    def from_api(cls, res: dict[str, Any], config: dict[str, Any]) -> Self:
+        fee = OmniMetadataConfig.model_validate(config).transfer_fee
+        return cls.model_validate({**res, "withdrawal_fee": fee})
 
 
 def _int_value(value: Any) -> int:
@@ -300,11 +324,15 @@ class OmniClient:
         return OmniSettlementPool(**res)
 
     async def pool_details(self) -> OmniPoolDetails:
-        res = await self._call("GET", "/settlement_pools/details")
-        return OmniPoolDetails(**res)
+        res, config = await asyncio.gather(
+            self._call("GET", "/settlement_pools/details"),
+            self._call("GET", "/metadata/config"),
+        )
+        return OmniPoolDetails.from_api(res, config)
 
     async def deposit_balance(self) -> Decimal:
-        return (await self.pool_details()).balance
+        res = await self._call("GET", "/settlement_pools/details")
+        return Decimal(res["balance"])
 
     async def deposit_asset(self) -> DepositAsset:
         return OMNI_DEPOSIT_ASSET
@@ -401,13 +429,21 @@ class OmniClient:
             raise ApiError("Omni USDC permit failed")
 
     async def create_deposit(self, pool: OmniSettlementPool, amount: Decimal) -> str:
+        return await self._create_transfer(pool, amount, "deposit")
+
+    async def _create_transfer(
+        self,
+        pool: OmniSettlementPool,
+        amount: Decimal,
+        transfer_type: Literal["deposit", "withdrawal"],
+    ) -> str:
         units = to_token_units(amount, USDC)
         amount = Decimal(units).scaleb(-USDC.decimals)
         pld = {
             "asset": USDC.symbol,
             "qty": format(amount, "f"),
             "target_pool_location": pool.id,
-            "transfer_type": "deposit",
+            "transfer_type": transfer_type,
         }
         res = await self._call(
             "POST",
@@ -418,30 +454,31 @@ class OmniClient:
         )
         transfer_id = res.get("id") if isinstance(res, dict) else None
         if not isinstance(transfer_id, str) or not transfer_id:
-            raise ApiError("Invalid Omni deposit response")
+            raise ApiError(f"Invalid Omni {transfer_type} response")
 
         return transfer_id
 
-    async def wait_for_transfer(self, transfer_id: str) -> None:
+    async def wait_for_transfer(self, transfer_id: str) -> str:
         deadline = time.monotonic() + DEPOSIT_CREDIT_TIMEOUT_SEC
         pld = {"order_by": "created_at", "order": "desc", "limit": 50, "offset": 0}
         while time.monotonic() < deadline:
             res = await self._call("GET", "/transfers", params=pld)
-            transfer = utils.first(
+            item = utils.first(
                 [item for item in res.get("result", []) if item.get("id") == transfer_id]
             )
-            status = transfer.get("status") if transfer else None
-            if status == "confirmed":
-                return
-            if status in {"cancelled", "failed", "rejected"}:
-                raise ApiError(f"Omni deposit {status}: {transfer_id}")
+            transfer = OmniTransfer.model_validate(item) if item else None
+            if transfer and transfer.status == "confirmed" and transfer.confirmed_by_transaction_id:
+                return transfer.confirmed_by_transaction_id
+            if transfer and transfer.status in {"cancelled", "failed", "rejected"}:
+                raise ApiError(f"Omni transfer {transfer.status}: {transfer_id}")
 
             await asyncio.sleep(DEPOSIT_POLL_DELAY)
 
-        raise ApiError(f"Omni deposit confirmation timed out: {transfer_id}")
+        raise ApiError(f"Omni transfer confirmation timed out: {transfer_id}")
 
     async def deposit(self, amount: Decimal) -> str:
         amount = deposit_amount(amount, USDC.decimals)
+        logger.info(f"Deposit {amount:,.2f} {USDC.symbol}")
         pool = await self.settlement_pool()
         wallet = await self.wallet_usdc_balance()
         if wallet < amount:
@@ -451,7 +488,72 @@ class OmniClient:
         await self.ensure_deposit_allowance(pool, amount)
         transfer_id = await self.create_deposit(pool, amount)
         logger.info(f"Deposit submitted: {transfer_id}; waiting for confirmation")
-        await self.wait_for_transfer(transfer_id)
+        tx_hash = await self.wait_for_transfer(transfer_id)
+        logger.success(f"Deposit confirmed: {ARBITRUM.tx_url(tx_hash)}")
+        return transfer_id
+
+    async def withdrawal_info(self) -> WithdrawalInfo:
+        if not await self.registered():
+            return WithdrawalInfo(
+                "Omni",
+                ARBITRUM,
+                USDC,
+                Decimal(0),
+                Decimal(0),
+                unavailable="not registered",
+            )
+
+        details, blocker = await asyncio.gather(
+            self.pool_details(),
+            self._withdrawal_blocker(),
+        )
+        return WithdrawalInfo(
+            "Omni",
+            ARBITRUM,
+            USDC,
+            details.balance,
+            details.max_withdrawable_amount,
+            unavailable=blocker,
+            fee=details.withdrawal_fee,
+        )
+
+    async def _withdrawal_blocker(self) -> str | None:
+        orders, positions = await asyncio.gather(
+            self.orders(status="pending"),
+            self.positions(),
+        )
+        if orders and positions:
+            return "open positions and orders"
+        if positions:
+            return "open positions"
+        if orders:
+            return "open orders"
+        return None
+
+    async def withdraw(self, amount: Decimal) -> str:
+        amount = withdrawal_amount(amount, USDC.decimals)
+        logger.info(f"Withdraw {amount:,.2f} {USDC.symbol}")
+        pool, details, blocker = await asyncio.gather(
+            self.settlement_pool(),
+            self.pool_details(),
+            self._withdrawal_blocker(),
+        )
+        if blocker:
+            raise ApiError(f"Withdrawal blocked: {blocker}")
+        safe_amount = withdrawal_limit(
+            details.balance,
+            details.max_withdrawable_amount,
+            details.withdrawal_fee,
+        )
+        if amount > safe_amount:
+            raise ApiError(
+                f"Withdrawal exceeds safe {USDC.symbol} amount: {safe_amount} < {amount}"
+            )
+
+        transfer_id = await self._create_transfer(pool, amount, "withdrawal")
+        logger.info(f"Withdrawal submitted: {transfer_id}; waiting for confirmation")
+        tx_hash = await self.wait_for_transfer(transfer_id)
+        logger.success(f"Withdrawal confirmed: {ARBITRUM.tx_url(tx_hash)}")
         return transfer_id
 
     @ttl_cache(600)
@@ -572,29 +674,45 @@ class OmniClient:
 
     # MARK: Orders
 
-    async def get_order(self, order_id: str) -> Order | None:
-        pld = {"order_by": "created_at", "order": "desc", "limit": 20, "offset": 0}
-        res = await self._call("GET", "/orders/v2", params=pld)
-        item = next((x for x in res.get("result", []) if x.get("rfq_id") == order_id), None)
-        if item is None:
-            return None
-        o = OmniOrder(**item)
+    @staticmethod
+    def _load_order(item: dict) -> Order:
+        order = OmniOrder(**item)
         status_map = {
             "filled": OrderStatus.FILLED,
             "cleared": OrderStatus.FILLED,
             "pending": OrderStatus.OPEN,
         }
-        status = status_map.get(o.status, OrderStatus.CANCELED)
+        status = status_map.get(order.status, OrderStatus.CANCELED)
         return Order(
-            id=o.id,
-            symbol=o.market,
-            side="bid" if o.side == "buy" else "ask",
-            size=o.qty,
-            filled=o.qty if status == OrderStatus.FILLED else Decimal(0),
-            price=o.price or o.limit_price,
+            id=order.id,
+            symbol=order.market,
+            side="bid" if order.side == "buy" else "ask",
+            size=order.qty,
+            filled=order.qty if status == OrderStatus.FILLED else Decimal(0),
+            price=order.price or order.limit_price,
             status=status,
-            reduce_only=o.is_reduce_only,
+            reduce_only=order.is_reduce_only,
         )
+
+    async def orders(self, status: str | None = None) -> list[Order]:
+        pld = {"order_by": "created_at", "order": "desc", "limit": 20, "offset": 0}
+        if status is not None:
+            pld["status"] = status
+
+        orders = []
+        while True:
+            res = await self._call("GET", "/orders/v2", params=pld)
+            orders.extend(self._load_order(item) for item in res.get("result", []))
+            if not res.get("pagination", {}).get("next_page"):
+                return orders
+            pld["offset"] += pld["limit"]
+            await asyncio.sleep(_PAGINATION_DELAY)
+
+    async def get_order(self, order_id: str) -> Order | None:
+        pld = {"order_by": "created_at", "order": "desc", "limit": 20, "offset": 0}
+        res = await self._call("GET", "/orders/v2", params=pld)
+        item = next((x for x in res.get("result", []) if x.get("rfq_id") == order_id), None)
+        return self._load_order(item) if item is not None else None
 
     async def market_order(self, symbol: str, side: Side, qty: Decimal, reduce_only=False) -> Order:
         signed_qty = qty if side == "bid" else -qty
@@ -653,22 +771,11 @@ class OmniClient:
             return False
 
     async def cancel_all_orders(self) -> int:
-        pld = {"status": "pending", "order_by": "created_at", "order": "desc"}
-        pld = {**pld, "limit": 20, "offset": 0}
+        orders = await self.orders(status="pending")
+        for order in orders:
+            await self._call("POST", "/orders/cancel", json={"rfq_id": order.id})
 
-        items = []
-        while True:
-            res = await self._call("GET", "/orders/v2", params=pld)
-            items.extend(res.get("result", []))
-            pld["offset"] += pld["limit"]
-            if not res.get("pagination", {}).get("next_page"):
-                break
-            await asyncio.sleep(_PAGINATION_DELAY)
-
-        for x in items:
-            await self._call("POST", "/orders/cancel", json={"rfq_id": x["rfq_id"]})
-
-        return len(items)
+        return len(orders)
 
     # MARK: Positions
 

@@ -28,6 +28,12 @@ class EvmNetwork:
     chain_id: int
     rpc_url: str
     tokens: Mapping[str, EvmToken]
+    explorer_url: str | None = None
+
+    def tx_url(self, tx_hash: str) -> str:
+        if self.explorer_url is None:
+            return tx_hash
+        return f"{self.explorer_url.rstrip('/')}/tx/{tx_hash}"
 
 
 ROBINHOOD = EvmNetwork(
@@ -50,6 +56,7 @@ ARBITRUM = EvmNetwork(
     name="arbitrum",
     chain_id=42161,
     rpc_url="https://arb1.arbitrum.io/rpc",
+    explorer_url="https://arbiscan.io",
     tokens={
         "USDC": EvmToken("USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6),
     },
