@@ -6,6 +6,7 @@ import glob
 import importlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -42,32 +43,34 @@ def eprint(*args, **kwargs):
 
 def confirm(label: str) -> bool:
     prompt = f"{label} [y/N]: "
-    if not sys.stdin.isatty():
-        try:
-            return input(prompt).strip().lower() == "y"
-        except (EOFError, KeyboardInterrupt):
-            return False
-
+    previous_sigint = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        termios = cast(Any, importlib.import_module("termios"))
-        tty = cast(Any, importlib.import_module("tty"))
-    except ImportError:
-        try:
-            return input(prompt).strip().lower() == "y"
-        except (EOFError, KeyboardInterrupt):
-            return False
+        if not sys.stdin.isatty():
+            try:
+                return input(prompt).strip().lower() == "y"
+            except EOFError:
+                return False
 
-    print(prompt, end="", flush=True)
-    fd = sys.stdin.fileno()
-    settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        return sys.stdin.read(1).strip().lower() == "y"
-    except KeyboardInterrupt:
-        return False
+        try:
+            termios = cast(Any, importlib.import_module("termios"))
+            tty = cast(Any, importlib.import_module("tty"))
+        except ImportError:
+            try:
+                return input(prompt).strip().lower() == "y"
+            except EOFError:
+                return False
+
+        print(prompt, end="", flush=True)
+        fd = sys.stdin.fileno()
+        settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            return sys.stdin.read(1).strip().lower() == "y"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+            print()
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
-        print()
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def _env_enabled(name: str) -> bool:
@@ -93,6 +96,22 @@ class HelpFormatter(argparse.HelpFormatter):
             if getattr(subaction, "help", None) == argparse.SUPPRESS:
                 continue
             yield subaction
+
+
+class CliParser(argparse.ArgumentParser):
+    def error(self, message: str):
+        subparsers = [
+            action for action in self._actions if isinstance(action, argparse._SubParsersAction)
+        ]
+        labels = {
+            label for action in subparsers for label in (action.dest, action.metavar) if label
+        }
+        match = re.search(r"invalid choice: (.+?) \(choose from .+\)", message)
+        if match and any(message.startswith(f"argument {label}:") for label in labels):
+            message = f"unknown command: {match.group(1)}"
+
+        self.print_help(sys.stderr)
+        self.exit(2, f"\n{self.prog}: error: {message}\n")
 
 
 def cli_anyarg(
@@ -253,7 +272,7 @@ async def create_cli(
     sec_fields: list[str],
     custom_commands: dict[str, Callable[[argparse.ArgumentParser], None]] | None = None,
 ) -> argparse.Namespace:
-    cli = argparse.ArgumentParser(prog=name, formatter_class=HelpFormatter)
+    cli = CliParser(prog=name, formatter_class=HelpFormatter)
 
     sub = cli.add_subparsers(dest="command")
     sub.add_parser("trade", help="Run trading manager")
@@ -337,7 +356,7 @@ async def create_cli(
 async def _run_app(coro: Coroutine) -> None:
     try:
         await coro
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, KeyboardInterrupt):
         raise
     except BaseException:
         await telemetry.flush()

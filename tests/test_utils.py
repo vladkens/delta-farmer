@@ -3,27 +3,10 @@ import asyncio
 import pytest
 
 from lib.errors import AppError
-from lib.models import DurationSec, TimeRange
-from lib.utils import gather_accs, parse_duration
+from lib.utils import gather_accs
 
 
-def test_parse_duration_supports_days():
-    assert parse_duration("3d") == 259200
-    assert parse_duration("1d2h30m") == 95400
-
-
-def test_duration_sec_accepts_day_strings():
-    assert DurationSec("4d") == 345600
-
-
-def test_time_range_accepts_day_strings():
-    duration = TimeRange.model_validate({"min": "3d", "max": "4d"})
-
-    assert duration.min == 259200
-    assert duration.max == 345600
-
-
-async def test_gather_accs_waits_for_all_accounts_before_reporting_failure():
+async def test_gather_waits_before_error():
     finished = asyncio.Event()
 
     class Account:

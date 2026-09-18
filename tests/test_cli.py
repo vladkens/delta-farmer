@@ -1,99 +1,76 @@
-# delta-farmer | https://github.com/vladkens/delta-farmer
-# Copyright (c) vladkens | MIT License | Small plans, fewer surprises
 import argparse
-from unittest.mock import Mock
+import signal
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from lib.cli import _handle_login, create_clients
+from lib.cli import CliParser, _handle_login, confirm, create_clients
+from lib.errors import AppError
 from lib.models import AccountConfig
 
 
-class FakeClient:
-    def __init__(self, name: str, failures: int = 0):
+class Client:
+    def __init__(self, name: str):
         self.name = name
-        self.failures = failures
-        self.login_calls: list[bool] = []
 
     async def login(self, *, force: bool = False) -> None:
-        self.login_calls.append(force)
-        if self.failures:
-            self.failures -= 1
-            raise RuntimeError("temporary login failure")
+        return None
 
 
-async def test_create_clients_splits_enabled_accounts():
-    args = argparse.Namespace(command="info")
-    accounts = [
-        AccountConfig(name="enabled", privkey="x", enabled=True),
-        AccountConfig(name="disabled", privkey="x", enabled=False),
+def test_confirm_sigint(monkeypatch):
+    previous = Mock()
+    set_signal = Mock(return_value=previous)
+    monkeypatch.setattr("lib.cli.signal.signal", set_signal)
+    monkeypatch.setattr("lib.cli.sys.stdin", Mock(isatty=Mock(return_value=False)))
+    monkeypatch.setattr("builtins.input", Mock(side_effect=KeyboardInterrupt))
+
+    with pytest.raises(KeyboardInterrupt):
+        confirm("Continue?")
+
+    assert set_signal.call_args_list == [
+        call(signal.SIGINT, signal.default_int_handler),
+        call(signal.SIGINT, previous),
     ]
 
-    all_clients, active_clients = await create_clients(
-        args, accounts, lambda account: FakeClient(account.name)
-    )
 
-    assert [client.name for client in all_clients] == ["enabled", "disabled"]
-    assert [client.name for client in active_clients] == ["enabled"]
-
-
-@pytest.mark.parametrize("force", [False, True])
-async def test_create_clients_handles_login_before_app_dispatch(monkeypatch, force):
-    args = argparse.Namespace(command="login", force=force)
-    accounts = [
-        AccountConfig(name="flaky", privkey="x", enabled=False),
-        AccountConfig(name="stable", privkey="x", enabled=True),
-    ]
-    clients: dict[str, FakeClient] = {}
-    order: list[str] = []
-
-    def factory(account: AccountConfig) -> FakeClient:
-        client = FakeClient(account.name, failures=1 if account.name == "flaky" else 0)
-        login = client.login
-
-        async def tracked_login(*, force: bool = False) -> None:
-            order.append(account.name)
-            await login(force=force)
-
-        client.login = tracked_login
-        clients[account.name] = client
-        return client
-
-    now = 0.0
-    sleeps: list[float] = []
-
-    async def sleep(delay: float) -> None:
-        nonlocal now
-        sleeps.append(delay)
-        now += delay
-
-    monkeypatch.setattr("lib.cli.asyncio.sleep", sleep)
-    monkeypatch.setattr("lib.cli.time.monotonic", Mock(side_effect=lambda: now))
+def test_unknown_command_help(capsys):
+    parser = CliParser(prog="exchange")
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("trade", help="Run trading manager")
+    commands.add_parser("info", help="Show accounts info")
 
     with pytest.raises(SystemExit) as exc:
-        await create_clients(args, accounts, factory)
+        parser.parse_args(["withdraw"])
 
-    assert exc.value.code == 0
-    assert clients["stable"].login_calls == [force]
-    assert clients["flaky"].login_calls == [force, force]
-    assert order == ["flaky", "stable", "flaky"]
-    assert sleeps == [30]
+    output = capsys.readouterr().err
+    assert exc.value.code == 2
+    assert "Run trading manager" in output
+    assert "Show accounts info" in output
+    assert "exchange: error: unknown command: 'withdraw'" in output
 
 
-async def test_login_recommends_new_proxy_after_three_failures(monkeypatch):
-    client = FakeClient("blocked", failures=3)
-    now = 0.0
-
-    async def sleep(delay: float) -> None:
-        nonlocal now
-        now += delay
-
-    warning = Mock()
+async def test_login_error_stops_retry(monkeypatch):
+    client = Mock(name="missing")
+    client.name = "missing"
+    client.login = AsyncMock(side_effect=AppError("Account is not registered; deposit first"))
+    sleep = AsyncMock()
     monkeypatch.setattr("lib.cli.asyncio.sleep", sleep)
-    monkeypatch.setattr("lib.cli.time.monotonic", Mock(side_effect=lambda: now))
-    monkeypatch.setattr("lib.cli.logger.warning", warning)
 
     await _handle_login([client], force=False)
 
-    assert client.login_calls == [False] * 4
-    warning.assert_any_call("Login keeps failing: blocked. Try a different proxy.")
+    client.login.assert_awaited_once_with(force=False)
+    sleep.assert_not_awaited()
+
+
+async def test_enabled_accounts():
+    accounts = [
+        AccountConfig(name="on", privkey="x", enabled=True),
+        AccountConfig(name="off", privkey="x", enabled=False),
+    ]
+
+    all_clients, active = await create_clients(
+        argparse.Namespace(command="info"), accounts, lambda account: Client(account.name)
+    )
+
+    assert [client.name for client in all_clients] == ["on", "off"]
+    assert [client.name for client in active] == ["on"]

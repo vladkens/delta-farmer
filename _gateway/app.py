@@ -13,14 +13,21 @@ from urllib.parse import urlparse
 import httpx
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 ASTRUM_API = "https://solver.astrum.foundation/api"
 OMNI_HOST = "omni.variational.io"
 TASK_LIMIT = 3
 TASK_TTL_SECONDS = 300
+PENALTY_BASE_SECONDS = 15 * 60
+PENALTY_FACTOR = 2
+PENALTY_MAX_LEVEL = 4
+PENALTY_MAX_SECONDS = 4 * 60 * 60
+PENALTY_RESET_SECONDS = 12 * 60 * 60
+PENALTY_RETRY_SECONDS = 24 * 60 * 60
 STATS_DAYS = 7
-STAT_NAMES = ("active", "created", "blocked", "completed", "failed")
+STAT_NAMES = ("active", "created", "blocked", "penalized", "completed", "failed")
+STATUS_NAMES = ("active", "created", "penalized", "clients")
 STATUS_IPS = {
     str(IPv4Address(ip.strip())) for ip in os.environ["STATUS_IPS"].split(",") if ip.strip()
 }
@@ -86,12 +93,24 @@ def get_client_ip(request: Request) -> str:
         raise HTTPException(status_code=400, detail="Invalid Fly-Client-IP") from e
 
 
+def validate_status_ip(request: Request) -> None:
+    if get_client_ip(request) not in STATUS_IPS:
+        raise HTTPException(status_code=403)
+
+
 def parse_response(response: Response) -> dict[str, Any]:
     try:
         result = json.loads(response.body)
         return result if isinstance(result, dict) else {}
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {}
+
+
+def get_client_id(task: dict[str, Any]) -> str:
+    identity = json.dumps(
+        [task.get("proxyURL"), task.get("userAgent")], separators=(",", ":")
+    ).encode()
+    return hmac.digest(os.environ["ASTRUM_CAPTCHA_KEY"].encode(), identity, "sha256").hex()
 
 
 async def add_stat(name: str, ip: str) -> None:
@@ -102,11 +121,7 @@ async def add_stat(name: str, ip: str) -> None:
         await pipe.execute()
 
 
-async def add_client_stat(ip: str, task: dict[str, Any]) -> None:
-    identity = json.dumps(
-        [task.get("proxyURL"), task.get("userAgent")], separators=(",", ":")
-    ).encode()
-    client_id = hmac.digest(os.environ["ASTRUM_CAPTCHA_KEY"].encode(), identity, "sha256").hex()
+async def add_client_stat(ip: str, client_id: str) -> None:
     key = f"astrum:clients:{datetime.now(UTC):%Y-%m-%d}:{ip}"
     async with redis_client.pipeline(transaction=True) as pipe:
         pipe.zincrby(key, 1, client_id)
@@ -132,30 +147,70 @@ async def create_task(payload: dict[str, Any], request: Request) -> Response:
     task = get_task(payload)
     validate_create_task(task)
     ip = get_client_ip(request)
-    await add_client_stat(ip, task)
+    client_id = get_client_id(task)
+    await add_client_stat(ip, client_id)
     key = f"astrum:active:{ip}"
     reservation = uuid.uuid4().hex
-    if not await redis_client.eval(ACQUIRE_TASK, 1, key, TASK_LIMIT, TASK_TTL_SECONDS, reservation):
-        await add_stat("blocked", ip)
-        raise HTTPException(status_code=429, detail="Too many active CAPTCHA tasks")
+    penalty_key = f"astrum:penalty:{ip}:{client_id}"
+    lock = redis_client.lock(f"{penalty_key}:lock", timeout=TASK_TTL_SECONDS)
+    if not await lock.acquire(blocking=False):
+        await add_stat("penalized", ip)
+        raise HTTPException(status_code=429, detail="CAPTCHA client is already creating a task")
 
-    response = await proxy("createTask", task)
-    result = parse_response(response)
-    task_id = result.get("taskId")
-    if task_id:
+    try:
+        now = int(time.time())
+        state = await redis_client.hgetall(penalty_key)
+        next_allowed = int(state.get("next_allowed", 0))
+        if now < next_allowed:
+            next_allowed = now + PENALTY_RETRY_SECONDS
+            async with redis_client.pipeline(transaction=True) as pipe:
+                pipe.hset(penalty_key, "next_allowed", next_allowed)
+                pipe.expire(penalty_key, PENALTY_RETRY_SECONDS)
+                await pipe.execute()
+            await add_stat("penalized", ip)
+            raise HTTPException(
+                status_code=429,
+                detail="CAPTCHA client is temporarily limited",
+                headers={"Retry-After": str(PENALTY_RETRY_SECONDS)},
+            )
+
+        if not await redis_client.eval(
+            ACQUIRE_TASK, 1, key, TASK_LIMIT, TASK_TTL_SECONDS, reservation
+        ):
+            await add_stat("blocked", ip)
+            raise HTTPException(status_code=429, detail="Too many active CAPTCHA tasks")
+
+        last_created = int(state.get("last_created", 0))
+        level = int(state.get("level", -1)) + 1 if now - last_created < PENALTY_RESET_SECONDS else 0
+        level = min(level, PENALTY_MAX_LEVEL)
+        delay = min(PENALTY_BASE_SECONDS * PENALTY_FACTOR**level, PENALTY_MAX_SECONDS)
         async with redis_client.pipeline(transaction=True) as pipe:
-            pipe.zrem(key, reservation)
-            pipe.zadd(key, {str(task_id): time.time() + TASK_TTL_SECONDS})
-            pipe.expire(key, TASK_TTL_SECONDS)
+            pipe.hset(
+                penalty_key,
+                mapping={"level": level, "last_created": now, "next_allowed": now + delay},
+            )
+            pipe.expire(penalty_key, PENALTY_RESET_SECONDS)
             await pipe.execute()
-        await add_stat("created", ip)
-    elif result.get("errorId") or 400 <= response.status_code < 500:
-        await redis_client.zrem(key, reservation)
-        await add_stat("failed", ip)
-    elif response.status_code >= 500:
-        await add_stat("failed", ip)
 
-    return response
+        response = await proxy("createTask", task)
+        result = parse_response(response)
+        task_id = result.get("taskId")
+        if task_id:
+            async with redis_client.pipeline(transaction=True) as pipe:
+                pipe.zrem(key, reservation)
+                pipe.zadd(key, {str(task_id): time.time() + TASK_TTL_SECONDS})
+                pipe.expire(key, TASK_TTL_SECONDS)
+                await pipe.execute()
+            await add_stat("created", ip)
+        elif result.get("errorId") or 400 <= response.status_code < 500:
+            await redis_client.zrem(key, reservation)
+            await add_stat("failed", ip)
+        elif response.status_code >= 500:
+            await add_stat("failed", ip)
+
+        return response
+    finally:
+        await lock.release()
 
 
 @app.post("/api/getTaskResult")
@@ -177,8 +232,7 @@ async def get_task_result(payload: dict[str, Any], request: Request) -> Response
 
 @app.get("/status", response_class=HTMLResponse)
 async def status(request: Request) -> str:
-    if get_client_ip(request) not in STATUS_IPS:
-        raise HTTPException(status_code=403)
+    validate_status_ip(request)
 
     rows: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     async for key in redis_client.scan_iter("astrum:active:*"):
@@ -201,33 +255,59 @@ async def status(request: Request) -> str:
     for row in rows.values():
         row["clients"] = sum(name.startswith("client:") for name in row)
 
-    totals = {name: sum(row[name] for row in rows.values()) for name in STAT_NAMES}
-    cards = "".join(
-        f"<div><b>{value:,}</b><span>{name}</span></div>" for name, value in totals.items()
-    )
+    totals = {name: sum(row[name] for row in rows.values()) for name in STATUS_NAMES}
+    summary = " · ".join(f"<b>{value:,}</b> {name}" for name, value in totals.items())
     body = "".join(
         f"<tr><td>{escape(ip)}</td>"
-        + "".join(f"<td>{row[name]:,}</td>" for name in (*STAT_NAMES, "clients"))
+        + "".join(f"<td>{row[name]:,}</td>" for name in STATUS_NAMES)
+        + f'<td><form method="post" action="/status/reset/{escape(ip)}" '
+        + f"onsubmit=\"return confirm('Clear data for {escape(ip)}?')\">"
+        + '<button type="submit">Clear</button></form></td>'
         + "</tr>"
         for ip, row in sorted(rows.items(), key=lambda item: IPv4Address(item[0]))
     )
-    headers = "".join(f"<th>{name}</th>" for name in (*STAT_NAMES, "clients"))
-    body = body or '<tr><td colspan="7">No activity</td></tr>'
+    headers = "".join(f"<th>{name}</th>" for name in STATUS_NAMES) + "<th></th>"
+    body = body or '<tr><td colspan="6">No activity</td></tr>'
     updated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta http-equiv="refresh" content="10">
 <meta name="viewport" content="width=device-width"><title>Gateway status</title>
 <style>
 body {{ font: 14px system-ui; margin: 40px auto; max-width: 900px; color: #222 }}
-h1 {{ font-size: 22px }}
-.cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0 }}
-.cards div {{ background: #f3f4f6; border-radius: 8px; padding: 14px 20px; min-width: 110px }}
-.cards b, .cards span {{ display: block }} .cards b {{ font-size: 24px }}
-.cards span, p {{ color: #666 }} table {{ border-collapse: collapse; width: 100% }}
+h1 {{ font-size: 22px }} p {{ color: #666 }} table {{ border-collapse: collapse; width: 100% }}
 th, td {{ padding: 9px 12px; border-bottom: 1px solid #ddd; text-align: right }}
 th:first-child, td:first-child {{ text-align: left }}
+form {{ margin: 0 }}
+button {{ background: #b42318; border: 0; border-radius: 6px; color: white; padding: 8px 12px }}
 </style></head><body><h1>Astrum gateway</h1>
-<div class="cards">{cards}</div>
+<p>{summary}</p>
 <table><thead><tr><th>IP</th>{headers}</tr></thead><tbody>{body}</tbody></table>
 <p>Last {STATS_DAYS} days · refreshes every 10 seconds · {updated}</p>
 </body></html>"""
+
+
+@app.post("/status/reset/{ip}")
+async def reset_status(ip: str, request: Request) -> RedirectResponse:
+    validate_status_ip(request)
+    try:
+        ip = str(IPv4Address(ip))
+    except AddressValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid IP address") from e
+
+    keys = [f"astrum:active:{ip}"]
+    keys.extend(
+        [
+            key
+            async for key in redis_client.scan_iter(f"astrum:penalty:{ip}:*")
+            if not key.endswith(":lock")
+        ]
+    )
+    keys.extend([key async for key in redis_client.scan_iter(f"astrum:clients:*:{ip}")])
+    if keys:
+        await redis_client.delete(*keys)
+
+    fields = [f"{name}:{ip}" for name in STAT_NAMES]
+    async for key in redis_client.scan_iter("astrum:stats:*"):
+        await redis_client.hdel(key, *fields)
+
+    return RedirectResponse("/status", status_code=303)

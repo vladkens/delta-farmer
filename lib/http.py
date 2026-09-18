@@ -139,7 +139,6 @@ class AsyncHttp:
         logname = f"Http {method} {url.split('?')[0]}"
         max_attempts = 9 if retry else 1
         attempts = 0
-        first_error_logged = False
         while True:
             try:
                 rep = await self.session.request(method, fullurl, **kwargs)
@@ -152,9 +151,8 @@ class AsyncHttp:
                     logger.error(f"{logname} failed after {attempts} attempts.")
                     raise e
 
-                if not first_error_logged:
-                    logger.debug(f"{logname} network error ({type(e)}), retrying...")
-                    first_error_logged = True
+                if attempts == 2:
+                    logger.debug(f"{logname} network errors persist, retrying...")
 
                 wait_sec = 0.75 * attempts
                 await asyncio.sleep(wait_sec)

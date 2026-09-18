@@ -21,6 +21,7 @@ from .trade import DeltaTrade, DeltaTradeSummary, plan_delta_trades
 
 USD_TICK = Decimal("0.01")
 SAFE_PCT = Decimal("0.96")  # leave 4% margin to avoid liquidation on leverage rounding
+PNL_MISMATCH_WARN_USD = 5.0
 
 
 def _format_error(exc: BaseException) -> str:
@@ -65,12 +66,24 @@ class Balances:
         parts = " | ".join(f"{name} {bal:.2f}" for name, bal in self._data.items())
         logger.info(f"Balances: {self.total:.2f} = {parts}")
 
-    def log_pnl(self, prev: "Balances", initial_total: float | Decimal) -> float:
+    def log_pnl(
+        self, prev: "Balances", initial_total: float | Decimal, last_total_pnl: float
+    ) -> tuple[float, float]:
         diff_sum = self.total - prev.total
         diffs = " | ".join(f"{x} {self._data[x] - prev._data[x]:+.2f}" for x in self._data)
         total_pnl = self.total - float(initial_total)
         logger.info(f"Δ {diff_sum:+.2f} ~ {diffs}; Total P/L: {total_pnl:+.2f}")
-        return diff_sum
+
+        expected_total_pnl = last_total_pnl + diff_sum
+        mismatch = total_pnl - expected_total_pnl
+        if abs(mismatch) > PNL_MISMATCH_WARN_USD:
+            logger.warning(
+                "Unexpected P/L change: "
+                f"expected {expected_total_pnl:+.2f}, actual {total_pnl:+.2f}, "
+                f"Δ {mismatch:+.2f}. Possible balance movement."
+            )
+
+        return diff_sum, total_pnl
 
 
 class RepeatErrorGuard:
@@ -113,6 +126,7 @@ class DeltaStrategy:
         self.accounts = list(accounts)
         self.stop_event = stop_event
         self.initial_bal: float = 0.0
+        self.last_total_pnl: float = 0.0
 
     # MARK: Core trading flow
 
@@ -219,7 +233,7 @@ class DeltaStrategy:
 
         # 7. Report P/L
         now_bals = await self.get_balances(accounts)
-        pnl = now_bals.log_pnl(was_bals, self.initial_bal)
+        pnl, self.last_total_pnl = now_bals.log_pnl(was_bals, self.initial_bal, self.last_total_pnl)
         dur = time.time() - stime
         await tg.on_trade_stop(pnl, dur, float(act_usd), now_bals.items(), msgid)
 
