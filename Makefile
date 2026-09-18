@@ -36,8 +36,9 @@ clean:
 
 FOREACH_CLT := $(filter-out hyperliquid vault,$(basename $(notdir $(wildcard apps/*.py))))
 FOREACH_CMD := $(strip $(cmd) $(if $(filter all,$(p)),,$(p)))
-FOREACH_RUN = echo "\n── $(1) ──" && uv run -m apps.$(1) $(FOREACH_CMD) --no-banner || { code=$$?; [ $$code -eq 130 ] && exit $$code; true; }
+FOREACH_RUN = echo "\n── $(1) ──" && uv run -m apps.$(1) $(FOREACH_CMD) || { code=$$?; [ $$code -eq 130 ] && exit $$code; true; }
 
+foreach: export DF_NO_BANNER = 1
 foreach:
 	@if [ -z "$(FOREACH_CMD)" ]; then \
 		echo 'usage: make foreach cmd="<command> [args...]" [p=last|this]'; \

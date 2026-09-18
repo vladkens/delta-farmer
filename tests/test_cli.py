@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from lib.cli import CliParser, _handle_login, confirm, create_clients
+from lib.cli import CliParser, _handle_login, confirm, create_cli, create_clients
 from lib.errors import AppError
 from lib.models import AccountConfig
 
@@ -12,6 +12,7 @@ from lib.models import AccountConfig
 class Client:
     def __init__(self, name: str):
         self.name = name
+        self.address = f"wallet-{name}"
 
     async def login(self, *, force: bool = False) -> None:
         return None
@@ -62,11 +63,19 @@ async def test_login_error_stops_retry(monkeypatch):
     sleep.assert_not_awaited()
 
 
-async def test_enabled_accounts():
+async def test_enabled_accounts(monkeypatch):
     accounts = [
         AccountConfig(name="on", privkey="x", enabled=True),
         AccountConfig(name="off", privkey="x", enabled=False),
     ]
+    check = AsyncMock(
+        return_value={"state": "none", "account_count": 1, "license": None, "offline": False}
+    )
+    eprint = Mock()
+    monkeypatch.setattr("lib.cli.support.check", check)
+    monkeypatch.setattr("lib.cli.eprint", eprint)
+    monkeypatch.setattr("lib.cli.latest_release_notice", AsyncMock(return_value=None))
+    monkeypatch.setenv("DF_NO_BANNER", "1")
 
     all_clients, active = await create_clients(
         argparse.Namespace(command="info"), accounts, lambda account: Client(account.name)
@@ -74,3 +83,52 @@ async def test_enabled_accounts():
 
     assert [client.name for client in all_clients] == ["on", "off"]
     assert [client.name for client in active] == ["on"]
+    check.assert_awaited_once_with(["wallet-on"])
+    assert any("delta-farmer" in call.args[0] for call in eprint.call_args_list)
+    assert any("supporter: free" in call.args[0] for call in eprint.call_args_list)
+
+
+async def test_supporter_can_hide_banner_with_env(monkeypatch):
+    license = {"plan": "small", "account_limit": 5, "paid_until": 2_000_000_000}
+    check = AsyncMock(
+        return_value={
+            "state": "active",
+            "account_count": 1,
+            "license": license,
+            "offline": False,
+        }
+    )
+    eprint = Mock()
+    monkeypatch.setattr("lib.cli.support.check", check)
+    monkeypatch.setattr("lib.cli.eprint", eprint)
+    monkeypatch.setattr("lib.cli.latest_release_notice", AsyncMock(return_value=None))
+    monkeypatch.setenv("DF_NO_BANNER", "1")
+
+    await create_clients(
+        argparse.Namespace(command="info"),
+        [AccountConfig(name="on", privkey="x")],
+        lambda account: Client(account.name),
+    )
+
+    check.assert_awaited_once_with(["wallet-on"])
+    eprint.assert_not_called()
+
+
+async def test_license_activate_uses_hidden_prompt(monkeypatch):
+    license = {"plan": "small", "account_limit": 5, "paid_until": 2_000_000_000}
+    activate = AsyncMock(return_value=license)
+    prompt = Mock(return_value="secret-key")
+    monkeypatch.setattr("lib.cli.sys.argv", ["exchange", "license", "activate"])
+    monkeypatch.setattr("lib.cli.getpass.getpass", prompt)
+    monkeypatch.setattr("lib.cli.support.activate", activate)
+    monkeypatch.setattr("lib.cli.support.check", AsyncMock())
+    monkeypatch.setattr("lib.cli._show_banner", AsyncMock())
+    monkeypatch.setattr("lib.cli.telemetry.init", Mock())
+    monkeypatch.setattr("lib.cli.telemetry.flush", AsyncMock())
+
+    with pytest.raises(SystemExit) as exc:
+        await create_cli("exchange", "config.toml", ["privkey"])
+
+    assert exc.value.code == 0
+    prompt.assert_called_once_with("Supporter key: ")
+    assert activate.await_args.args[0] == "secret-key"

@@ -18,6 +18,7 @@ dependencies = [
     "loguru>=0.7.3",
     "msgpack>=1.1.2",
     "py-machineid>=1.0.0",
+    "pyjwt>=2.10.1",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "rich>=14.3.2",
