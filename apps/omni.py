@@ -146,7 +146,8 @@ async def print_stats(accs: list[OmniClient], period="week", filter_period="all"
 
 
 def setup_competition_cli(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--join", action="store_true", help="Join competition with all accounts")
+    commands = parser.add_subparsers(dest="competition_action")
+    commands.add_parser("join", help="Join competition with all accounts")
 
 
 def setup_account_cli(parser: argparse.ArgumentParser) -> None:
@@ -191,53 +192,79 @@ def _print_competition_summary(status: OmniCompetitionStatus | None) -> None:
         return
 
     print(
-        f"Active Omni competition: "
-        f"{status.start_time:%Y-%m-%d %H:%M UTC} → {status.end_time:%Y-%m-%d %H:%M UTC}; "
-        f"eligibility threshold ${status.volume_threshold:,.0f} volume."
+        f"Omni competition: {status.start_time:%Y-%m-%d} → {status.end_time:%Y-%m-%d} UTC · "
+        f"min volume ${status.volume_threshold:,.0f}"
     )
 
 
 def _competition_status_table(rows: list[CompetitionRow]) -> None:
+    def metric(value: Decimal | None, rank: int | None, spec: str, suffix: str = "") -> str | None:
+        if value is None:
+            return None
+
+        result = f"{format(value, spec)}{suffix}"
+        return f"{result} (#{rank})" if rank is not None else result
+
     first_status = next((status for _acc, status, _error in rows if status is not None), None)
     _print_competition_summary(first_status)
 
-    tbl = AutoTable(
-        Column("", justify="left"),
+    show_pnl = any(s and s.user and s.user.pnl_total is not None for _, s, _ in rows)
+    show_roi = any(s and s.user and s.user.roi_total is not None for _, s, _ in rows)
+    columns = [
         Column("Account", justify="left"),
-        Column("Address", justify="left"),
-        Column("Joined", justify="left"),
-        Column("Eligible", justify="left"),
-        Column("Volume", "{:,.0f}"),
-        Column("Volume Place", "{:,}"),
-        Column("PnL", "{:,.2f}"),
-        Column("PnL Place", "{:,}"),
-        Column("ROI", "{:.2f}%"),
-        Column("ROI Place", "{:,}"),
-    )
+        Column("Status", justify="left"),
+        Column("Volume"),
+    ]
+    if show_pnl:
+        columns.append(Column("PnL"))
+    if show_roi:
+        columns.append(Column("ROI"))
+
+    tbl = AutoTable(*columns)
 
     for acc, status, error in rows:
         user = status.user if status else None
         volume = user.volume_total if user and user.volume_total is not None else Decimal(0)
         eligible = bool(status is not None and volume >= status.volume_threshold)
-        tbl.add_row(
-            "✗" if error else "✓",
+        if error:
+            state = "error"
+        elif eligible:
+            state = "eligible"
+        elif user:
+            state = "joined"
+        else:
+            state = "not joined"
+
+        values = [
             acc.name,
-            short_addr(acc.address),
-            "yes" if user else "no",
-            "yes" if eligible else "no" if status and status.ongoing else "n/a",
-            volume if user else None,
-            user.volume_rank if user else None,
-            user.pnl_total if user else None,
-            user.pnl_rank if user else None,
-            user.roi_total if user else None,
-            user.roi_rank if user else None,
-        )
+            state,
+            metric(volume, user.volume_rank, ",.0f") if user else None,
+        ]
+        if show_pnl:
+            values.append(metric(user.pnl_total, user.pnl_rank, ",.2f") if user else None)
+        if show_roi:
+            values.append(metric(user.roi_total, user.roi_rank, ".2f", "%") if user else None)
+
+        tbl.add_row(*values)
 
     tbl.print()
 
     needs_join = any(status and status.ongoing and status.user is None for _a, status, _e in rows)
     if needs_join:
-        print("* Some accounts have not joined. Run `uv run apps/omni.py competition --join`.")
+        print("* Some accounts have not joined. Run `uv run apps/omni.py competition join`.")
+
+
+async def print_competition_hint(accs: list[OmniClient]) -> None:
+    if not accs:
+        return
+
+    try:
+        status = await accs[0].competition_status()
+    except ApiError:
+        return
+
+    if status.ongoing:
+        print("Omni competition is active. Join: `uv run apps/omni.py competition join`.")
 
 
 async def print_competition_status(accs: list[OmniClient]) -> None:
@@ -254,7 +281,7 @@ async def join_competition(accs: list[OmniClient]) -> None:
     async def row(acc: OmniClient):
         try:
             status = await acc.competition_status()
-            if status.ongoing:
+            if status.ongoing and status.user is None:
                 await acc.competition_opt_in()
                 status = await acc.competition_status()
             return acc, status, None
@@ -287,6 +314,7 @@ async def main():
     match cli.command:
         case "info":
             await print_info(all_accs)
+            await print_competition_hint(all_accs)
         case "stats":
             await print_stats(all_accs, period=cli.group, filter_period=cli.filter, force=cli.force)
         case "close":
@@ -296,7 +324,7 @@ async def main():
         case "positions":
             await print_positions(act_accs)
         case "competition":
-            if cli.join:
+            if cli.competition_action == "join":
                 await join_competition(all_accs)
             else:
                 await print_competition_status(all_accs)
