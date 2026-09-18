@@ -1,6 +1,7 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Probably works in production
 import asyncio
+import base64
 import json
 import time
 from dataclasses import dataclass
@@ -14,18 +15,17 @@ from eth_account.messages import encode_defunct
 
 from lib import utils
 from lib.decorators import bind_log_context, locked, ttl_cache
-from lib.evm import USDC_BY_CHAIN
+from lib.errors import AppError
+from lib.evm import ROBINHOOD_CHAIN_ID, USDG_BY_CHAIN
 from lib.http import ApiError, AsyncHttp, HttpMethod
-from lib.lighter_crypto import AuthToken, LighterSigner, SignedTx
+from lib.lighter_crypto import ROBINHOOD_SIGNING_CHAIN_ID, AuthToken, LighterSigner, SignedTx
 from lib.models import AccountConfig
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side
 
-API_URL = "https://mainnet.zklighter.elliot.ai"
-APP_URL = "https://app.lighter.xyz"
-
-# Public project key embedded by Lighter in Fun Connect SDK requests; it is not a secret.
-FUN_ASSETS_URL = "https://api.fun.xyz/v1/assets/supported"
-FUN_PUBLIC_API_KEY = "i6e1I8cfX625TTwRJlD2DshKyAoaUtO8aeoaR4i2"
+API_URL = "https://api.rh.lighter.xyz"
+APP_URL = "https://robinhoodchain.lighter.xyz"
+DEPOSIT_CONTRACT = "0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d"
+USDG_ASSET_INDEX = 3
 
 API_KEY_INDEX = 3
 POLL_ATTEMPTS = 30
@@ -61,44 +61,56 @@ class LighterApiError(ApiError):
     def is_auth_missing(self) -> bool:
         return self.code in {20013, 21109}
 
-    def is_deposit_missing(self) -> bool:
-        return self.code == 29404
-
 
 @dataclass(frozen=True)
 class DepositNetwork:
+    name: str
     chain_id: int
-    usdc: str
+    token: str
+    symbol: str
+    contract: str
+    asset_index: int
     decimals: int
     min_amount: Decimal
 
 
-def _deposit_usdc(assets: dict, chain_id: int) -> DepositNetwork:
-    # API metadata must not choose the contract called by a signed deposit transaction.
-    expected = USDC_BY_CHAIN.get(chain_id)
-    if expected is None:
-        raise ApiError(f"USDC deposit contract is not trusted on chain {chain_id}")
-
-    address, decimals = expected
-    asset = utils.first(
-        [x for x in assets.values() if str(x.get("address", "")).lower() == address.lower()]
+def _deposit_network(layer1: dict, assets: dict) -> DepositNetwork:
+    provider = utils.first(
+        [x for x in layer1["l1_providers"] if x["chainId"] == ROBINHOOD_CHAIN_ID]
     )
+    contract = utils.first(
+        [x for x in layer1["contract_addresses"] if x["name"] == "ZkLighterContract"]
+    )
+    asset = utils.first([x for x in assets["asset_details"] if x["symbol"] == "USDG"])
+    expected_token, expected_decimals = USDG_BY_CHAIN[ROBINHOOD_CHAIN_ID]
     if (
-        asset is None
-        or asset.get("symbol") != "USDC"
-        or asset.get("decimals") != decimals
-        or asset.get("allowed") is not True
+        provider is None
+        or contract is None
+        or contract["address"].lower() != DEPOSIT_CONTRACT.lower()
+        or asset is None
+        or asset["asset_id"] != USDG_ASSET_INDEX
+        or asset["l1_address"].lower() != expected_token.lower()
+        or asset["l1_decimals"] != expected_decimals
     ):
-        raise ApiError(f"Unexpected USDC metadata from Fun on chain {chain_id}")
+        raise ApiError("Unexpected Robinhood Lighter deposit metadata")
 
     try:
-        min_amount = Decimal(str(asset["minCheckoutUsd"]))
+        min_amount = Decimal(str(asset["min_transfer_amount"]))
     except (InvalidOperation, KeyError):
-        raise ApiError(f"Invalid minimum USDC deposit on chain {chain_id}") from None
+        raise ApiError("Invalid minimum USDG deposit") from None
     if not min_amount.is_finite() or min_amount <= 0:
-        raise ApiError(f"Invalid minimum USDC deposit on chain {chain_id}")
+        raise ApiError("Invalid minimum USDG deposit")
 
-    return DepositNetwork(chain_id, address, decimals, min_amount)
+    return DepositNetwork(
+        name="robinhood",
+        chain_id=ROBINHOOD_CHAIN_ID,
+        token=expected_token,
+        symbol="USDG",
+        contract=DEPOSIT_CONTRACT,
+        asset_index=USDG_ASSET_INDEX,
+        decimals=expected_decimals,
+        min_amount=min_amount,
+    )
 
 
 def to_domain_status(status: str) -> OrderStatus:
@@ -149,7 +161,7 @@ class LighterClient:
         self.proxy = proxy
         self.account = utils.parse_eth_key(privkey, name)
         self.address = self.account.address
-        self.signer = LighterSigner(privkey)
+        self.signer = LighterSigner(privkey, ROBINHOOD_SIGNING_CHAIN_ID)
         self._account_index: int | None = None
         self._auth_token: AuthToken | None = None
         self._last_nonce = 0
@@ -169,8 +181,10 @@ class LighterClient:
         except ValueError:
             raise ApiError("Lighter API error", rep)
 
-        if not rep.ok or res["code"] != 200:
+        if "code" in res and res["code"] != 200:
             raise LighterApiError(rep, res)
+        if not rep.ok:
+            raise ApiError("Lighter API error", rep)
 
         return res
 
@@ -218,25 +232,48 @@ class LighterClient:
         res = await self._call("GET", "/api/v1/referral/userReferrals", params=pld, headers=hdr)
         return res.get("used_code") or None
 
+    async def _get_points(self) -> tuple[Decimal, int | None]:
+        pld = {"type": "all", "l1_address": self.address}
+        res = await self._call("GET", "/api/v1/leaderboard", params=pld)
+        address = self.address.lower()
+        item = utils.first([x for x in res["entries"] if x["l1_address"].lower() == address])
+        if item is None:
+            return Decimal(0), None
+
+        rank = int(item["entry"])
+        return Decimal(str(item["points"])), rank or None
+
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
         account_index = info["account_index"]
         volume, pnl = await self._get_volume_and_pnl(account_index)
         ref_code = await self._get_used_referral_code(account_index)
+        points, rank = await self._get_points()
 
         return ProfileInfo(
             addr=utils.short_addr(self.address),
             balance=Decimal(info["collateral"]),
             volume=volume,
             pnl=pnl,
-            points=Decimal(0),
+            points=points,
             ref_code=ref_code,
+            rank=rank,
         )
 
     async def use_referral_code(self, referral_code: str) -> None:
-        account_index = await self._get_account_index()
-        hdr = self._get_auth_headers(account_index)
-        pld = {"l1_address": self.address, "referral_code": referral_code}
+        # The web client calls this a signature, but it is a Base64 protocol marker.
+        signature = f"{self.address}{referral_code}wP81zDNpES"
+        signature = base64.b64encode(signature.encode()).decode()
+        hdr = {"PreferAuthServer": "true"}
+        pld = {
+            "l1_address": self.address,
+            "referral_code": referral_code,
+            "discord": "",
+            "telegram": "",
+            "x": "",
+            "signature": signature,
+            "source": "none",
+        }
         await self._call("POST", "/api/v1/referral/use", data=pld, headers=hdr)
 
     async def _get_account_index(self) -> int:
@@ -365,7 +402,13 @@ class LighterClient:
 
     @locked
     async def login(self, *, force: bool = False) -> str:
-        account = await self.account_info()
+        try:
+            account = await self.account_info()
+        except LighterApiError as error:
+            if error.is_account_missing():
+                raise AppError("Account is not registered; deposit first") from None
+            raise
+
         account_index = account["account_index"]
         public_key = await self._get_api_key(account_index)
         if force or public_key != self.signer.public_key:
@@ -484,57 +527,13 @@ class LighterClient:
         return Decimal((await self.account_info())["collateral"])
 
     @ttl_cache(3600)
-    async def deposit_network(self, network: str) -> DepositNetwork:
-        data = await self._call("GET", "/api/v1/deposit/networks")
-        name = network.strip().lower()
-        item = utils.first(
-            [
-                x
-                for x in data["networks"]
-                if str(x["chain_id"]) == name
-                or x["name"].lower() == name
-                or x["name"].lower().startswith(f"{name} ")
-            ]
-        )
-        if item is None:
-            raise ApiError(f"Unsupported Lighter deposit network: {network}")
+    async def deposit_network(self) -> DepositNetwork:
+        layer1 = await self._call("GET", "/api/v1/layer1BasicInfo")
+        assets = await self._call("GET", "/api/v1/assetDetails")
+        return _deposit_network(layer1, assets)
 
-        rep = await self.http.request(
-            "GET",
-            FUN_ASSETS_URL,
-            headers={"x-api-key": FUN_PUBLIC_API_KEY},
-        )
-        if not rep.ok:
-            raise ApiError("Lighter deposit assets error", rep)
-
-        chain_id = int(item["chain_id"])
-        assets = rep.json().get(str(chain_id))
-        if not isinstance(assets, dict):
-            raise ApiError(f"USDC deposits are unavailable on {item['name']}")
-
-        return _deposit_usdc(assets, chain_id)
-
-    async def get_min_deposit_usd(self, network: str) -> Decimal:
-        return (await self.deposit_network(network)).min_amount
-
-    async def create_deposit_intent(self, chain_id: int, amount: int) -> str:
-        pld = {
-            "chain_id": str(chain_id),
-            "from_addr": self.address,
-            "amount": str(amount),
-            "is_external_deposit": "false",
-        }
-        data = await self._call("POST", "/api/v1/createIntentAddress", data=pld)
-        return data["intent_address"]
-
-    async def latest_deposit(self) -> dict | None:
-        pld = {"l1_address": self.address}
-        try:
-            return await self._call("GET", "/api/v1/deposit/latest", params=pld)
-        except LighterApiError as error:
-            if error.is_deposit_missing():
-                return None
-            raise
+    async def get_min_deposit_usd(self) -> Decimal:
+        return (await self.deposit_network()).min_amount
 
     async def positions(self) -> list[Position]:
         info = await self.account_info()

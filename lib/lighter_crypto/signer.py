@@ -24,6 +24,7 @@ from .poseidon import bytes_to_fields, poseidon_hash_fp5
 SCALAR_ORDER = 1067993516717146951041484916571792702745057740581727230159139685185762082554198619328292418486241
 SCALAR_BITS = SCALAR_ORDER.bit_length()
 LIGHTER_CHAIN_ID = 304
+ROBINHOOD_SIGNING_CHAIN_ID = 466324
 CHANGE_PUB_KEY_TX_TYPE = 8
 CREATE_ORDER_TX_TYPE = 14
 CANCEL_ORDER_TX_TYPE = 15
@@ -149,9 +150,9 @@ def _attributes_hash(skip_nonce: bool) -> Fp5 | None:
 
 
 class LighterSigner:
-    __slots__ = ("_private_key", "_public_key")
+    __slots__ = ("_private_key", "_public_key", "chain_id")
 
-    def __init__(self, seed: str):
+    def __init__(self, seed: str, chain_id: int = LIGHTER_CHAIN_ID):
         seed = seed.removeprefix("0x")
         try:
             seed_bytes = bytes.fromhex(seed)
@@ -168,6 +169,8 @@ class LighterSigner:
             raise ValueError("Lighter seed produced an invalid zero scalar")
 
         self._public_key = fp5_to_bytes(GENERATOR.mul(self._private_key).encode())
+        _check_range("chain_id", chain_id, 0, (1 << 32) - 1)
+        self.chain_id = chain_id
 
     @property
     def public_key(self) -> bytes:
@@ -199,8 +202,6 @@ class LighterSigner:
         max_spot_taker_fee: int,
         max_spot_maker_fee: int,
         approval_expiry: int,
-        *,
-        chain_id: int = LIGHTER_CHAIN_ID,
     ) -> str:
         self._validate_indices(account_index, api_key_index, nonce)
         _check_range("integrator_account_index", integrator_account_index, 0, MAX_ACCOUNT_INDEX)
@@ -209,8 +210,6 @@ class LighterSigner:
         _check_range("max_spot_taker_fee", max_spot_taker_fee, 0, MAX_FEE)
         _check_range("max_spot_maker_fee", max_spot_maker_fee, 0, MAX_FEE)
         _check_range("approval_expiry", approval_expiry, 0, MAX_TIMESTAMP)
-        _check_range("chain_id", chain_id, 0, (1 << 32) - 1)
-
         return (
             "Approve Integrator\n\n"
             f"nonce: 0x{nonce:016x}\n"
@@ -222,7 +221,7 @@ class LighterSigner:
             f"max spot taker fee: 0x{max_spot_taker_fee:016x}\n"
             f"max spot maker fee: 0x{max_spot_maker_fee:016x}\n"
             f"approval expiry: 0x{approval_expiry:016x}\n"
-            f"chainId: 0x{chain_id:016x}\n"
+            f"chainId: 0x{self.chain_id:016x}\n"
             "Only sign this message for a trusted client!"
         )
 
@@ -234,16 +233,14 @@ class LighterSigner:
         expired_at: int,
         *,
         skip_nonce: bool = True,
-        chain_id: int = LIGHTER_CHAIN_ID,
     ) -> bytes:
         self._validate_indices(account_index, api_key_index, nonce)
         _check_range("expired_at", expired_at, 0, MAX_TIMESTAMP)
-        _check_range("chain_id", chain_id, 0, (1 << 32) - 1)
 
         public_key = fp5_from_bytes(self._public_key)
         tx_hash = poseidon_hash_fp5(
             (
-                chain_id,
+                self.chain_id,
                 CHANGE_PUB_KEY_TX_TYPE,
                 nonce,
                 expired_at,
@@ -267,7 +264,6 @@ class LighterSigner:
         l1_signature: str,
         *,
         skip_nonce: bool = True,
-        chain_id: int = LIGHTER_CHAIN_ID,
     ) -> SignedTx:
         l1_signature = l1_signature.removeprefix("0x")
         try:
@@ -284,7 +280,6 @@ class LighterSigner:
             nonce,
             expired_at,
             skip_nonce=skip_nonce,
-            chain_id=chain_id,
         )
         signature = self._sign_hash(tx_hash)
         info: dict[str, object] = {
@@ -529,7 +524,7 @@ class LighterSigner:
         info: dict[str, object],
     ) -> SignedTx:
         tx_hash = poseidon_hash_fp5(
-            (LIGHTER_CHAIN_ID, tx_type, nonce, expired_at, account_index, api_key_index, *fields)
+            (self.chain_id, tx_type, nonce, expired_at, account_index, api_key_index, *fields)
         )
         attributes_hash = _attributes_hash(True)
         assert attributes_hash is not None

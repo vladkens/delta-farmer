@@ -201,6 +201,8 @@ async def _handle_login(clients: Sequence[LoginClient], *, force: bool) -> None:
             result = await client.login(force=force)
             suffix = f" ({result})" if result else ""
             logger.success(f"Login ready: {client.name}{suffix}")
+        except AppError as e:
+            logger.warning(f"Login skipped: {client.name}: {e}")
         except Exception as e:
             logger.warning(f"Login failed: {client.name}: {e}")
             failures += 1

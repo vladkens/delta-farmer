@@ -13,7 +13,9 @@ from .http import ApiError, AsyncHttp
 
 MAX_TX_FEE_WEI = 10**16
 ERC20_TRANSFER_GAS_LIMIT = 100_000
+ROBINHOOD_CHAIN_ID = 4663
 RPC_URLS = {
+    ROBINHOOD_CHAIN_ID: "https://rpc.mainnet.chain.robinhood.com",
     8453: "https://mainnet.base.org",
     42161: "https://arb1.arbitrum.io/rpc",
     43114: "https://api.avax.network/ext/bc/C/rpc",
@@ -25,6 +27,11 @@ USDC_BY_CHAIN = {
     999: ("0xb88339CB7199b77E23DB6E890353E22632Ba630f", 6),
     8453: ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
     42161: ("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6),
+}
+
+# USDG contract addresses and decimals by EVM chain ID.
+USDG_BY_CHAIN = {
+    ROBINHOOD_CHAIN_ID: ("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", 6),
 }
 
 
@@ -121,6 +128,29 @@ def rpc_tx(tx: dict) -> dict:
 
 async def get_token_bal(rpc: RPC, token: str, owner: str) -> int:
     return (await read_contract(rpc, token, "balanceOf", ["address"], [owner], ["uint256"]))[0]
+
+
+async def get_token_allowance(rpc: RPC, token: str, owner: str, spender: str) -> int:
+    args = [owner, spender]
+    result = await read_contract(rpc, token, "allowance", ["address", "address"], args, ["uint256"])
+    return result[0]
+
+
+async def check_token_balance(
+    rpc: RPC,
+    token: str,
+    owner: str,
+    amount: int,
+    decimals: int,
+    symbol: str,
+) -> None:
+    balance = await get_token_bal(rpc, token, owner)
+    if balance < amount:
+        unit = Decimal(1).scaleb(-decimals)
+        raise ApiError(
+            f"Insufficient {symbol} on {rpc.network}: "
+            f"{Decimal(balance) * unit} < {Decimal(amount) * unit}"
+        )
 
 
 async def get_native_bal(rpc: RPC, owner: str) -> int:
@@ -224,25 +254,12 @@ def sign_tx(account: LocalAccount, tx: dict) -> SignedTransaction:
     )
 
 
-async def transfer_erc20(
+async def send_contract(
     rpc: RPC,
     account: LocalAccount,
-    token: str,
-    recipient: str,
-    amount: int,
-    decimals: int,
-    symbol: str,
+    call: dict,
     max_fee_wei: int = MAX_TX_FEE_WEI,
 ) -> tuple[str, Decimal]:
-    balance = await get_token_bal(rpc, token, account.address)
-    if balance < amount:
-        unit = Decimal(1).scaleb(-decimals)
-        raise ApiError(
-            f"Insufficient {symbol} on {rpc.network}: "
-            f"{Decimal(balance) * unit} < {Decimal(amount) * unit}"
-        )
-
-    call = make_call(token, "transfer", ["address", "uint256"], [to_addr(recipient), amount])
     tx = await prepare_tx(rpc, account, call)
     fee = int(tx["gas"]) * fee_cap(tx)
     fee_native = Decimal(fee).scaleb(-18)
@@ -255,6 +272,28 @@ async def transfer_erc20(
         raise ApiError(f"RPC returned a different transaction hash on {rpc.network}")
 
     return signed.hash, fee_native
+
+
+async def approve_erc20(
+    rpc: RPC,
+    account: LocalAccount,
+    token: str,
+    spender: str,
+    amount: int,
+) -> tuple[str, Decimal]:
+    call = make_call(token, "approve", ["address", "uint256"], [to_addr(spender), amount])
+    return await send_contract(rpc, account, call)
+
+
+async def transfer_erc20(
+    rpc: RPC,
+    account: LocalAccount,
+    token: str,
+    recipient: str,
+    amount: int,
+) -> tuple[str, Decimal]:
+    call = make_call(token, "transfer", ["address", "uint256"], [to_addr(recipient), amount])
+    return await send_contract(rpc, account, call)
 
 
 async def wait_receipt(rpc: RPC, tx_hash: str, timeout: float = 180) -> dict:
