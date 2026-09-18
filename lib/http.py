@@ -16,6 +16,7 @@ class ApiError(Exception):
     """Transient API or network error — safe to retry."""
 
     def __init__(self, msg: str, rep: Response | None = None):
+        self.rep = rep
         if rep is not None:
             body = rep.text.strip() if rep.text else ""
             body = "[html]" if body.startswith("<") else body  # Cloudflare WAF or nginx error page

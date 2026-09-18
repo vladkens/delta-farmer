@@ -29,7 +29,7 @@ from .update import latest_release_notice
 class LoginClient(Protocol):
     name: str
 
-    async def login(self, *, force: bool = False) -> None: ...
+    async def login(self, *, force: bool = False) -> str | None: ...
 
 
 LOGIN_RETRY_DELAY = 30
@@ -198,8 +198,9 @@ async def _handle_login(clients: Sequence[LoginClient], *, force: bool) -> None:
             await asyncio.sleep(wait)
 
         try:
-            await client.login(force=force)
-            logger.success(f"Login ready: {client.name}")
+            result = await client.login(force=force)
+            suffix = f" ({result})" if result else ""
+            logger.success(f"Login ready: {client.name}{suffix}")
         except Exception as e:
             logger.warning(f"Login failed: {client.name}: {e}")
             failures += 1

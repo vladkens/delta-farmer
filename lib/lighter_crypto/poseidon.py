@@ -1,6 +1,8 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | No AI was harmed making this
 
+from collections.abc import Iterable
+
 from .field import GOLDILOCKS_ORDER, Fp5, make_fp5
 
 WIDTH = 12
@@ -185,7 +187,7 @@ def _full_round(state: list[int], round_index: int) -> list[int]:
     return _external_layer(state)
 
 
-def poseidon_permute(values) -> tuple[int, ...]:
+def poseidon_permute(values: Iterable[int]) -> tuple[int, ...]:
     state = tuple(value % GOLDILOCKS_ORDER for value in values)
     if len(state) != WIDTH:
         raise ValueError(f"Poseidon2 state must have {WIDTH} elements, got {len(state)}")
@@ -208,7 +210,7 @@ def poseidon_permute(values) -> tuple[int, ...]:
     return tuple(state)
 
 
-def poseidon_hash(values, outputs: int = 5) -> tuple[int, ...]:
+def poseidon_hash(values: Iterable[int], outputs: int = 5) -> tuple[int, ...]:
     if outputs <= 0:
         raise ValueError("Poseidon2 output count must be positive")
 
@@ -227,7 +229,7 @@ def poseidon_hash(values, outputs: int = 5) -> tuple[int, ...]:
     return tuple(result[:outputs])
 
 
-def poseidon_hash_fp5(values) -> Fp5:
+def poseidon_hash_fp5(values: Iterable[int]) -> Fp5:
     return make_fp5(poseidon_hash(values, 5))
 
 

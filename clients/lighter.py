@@ -3,25 +3,31 @@
 import asyncio
 import json
 import time
-from datetime import datetime
-from decimal import Decimal
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Self
 
 from curl_cffi import CurlMime
+from curl_cffi.requests import Response
 from eth_account.messages import encode_defunct
 
 from lib import utils
 from lib.decorators import bind_log_context, locked, ttl_cache
+from lib.evm import USDC_BY_CHAIN
 from lib.http import ApiError, AsyncHttp, HttpMethod
-from lib.lighter_crypto import LighterSigner
-from lib.lighter_crypto.signer import AuthToken, SignedTx
+from lib.lighter_crypto import AuthToken, LighterSigner, SignedTx
 from lib.models import AccountConfig
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side
 
 API_URL = "https://mainnet.zklighter.elliot.ai"
 APP_URL = "https://app.lighter.xyz"
 
-API_KEY_INDEX = 0
+# Public project key embedded by Lighter in Fun Connect SDK requests; it is not a secret.
+FUN_ASSETS_URL = "https://api.fun.xyz/v1/assets/supported"
+FUN_PUBLIC_API_KEY = "i6e1I8cfX625TTwRJlD2DshKyAoaUtO8aeoaR4i2"
+
+API_KEY_INDEX = 3
 POLL_ATTEMPTS = 30
 POLL_DELAY = 2.0
 
@@ -29,7 +35,70 @@ TX_LIFETIME_MS = 599_000
 ORDER_LIFETIME_MS = 28 * 24 * 60 * 60 * 1_000
 AUTH_LIFETIME_SEC = 7 * 60 * 60
 AUTH_REFRESH_SEC = 10 * 60
+INTEGRATOR_APPROVAL_LIFETIME_MS = 365 * 24 * 60 * 60 * 1_000
 MARKET_SLIPPAGE = Decimal("0.01")
+INTEGRATOR_APPROVAL_FIELDS = {
+    "account_index": "fee_collector_account_index",
+    "max_perps_taker_fee": "max_integrator_perps_taker_fee",
+    "max_perps_maker_fee": "max_integrator_perps_maker_fee",
+    "max_spot_taker_fee": "max_integrator_spot_taker_fee",
+    "max_spot_maker_fee": "max_integrator_spot_maker_fee",
+}
+
+# The Lighter x Robinhood campaign started on 2026-09-01; earlier volume does not count.
+VOLUME_START_TIMESTAMP = int(datetime(2026, 9, 1, tzinfo=UTC).timestamp())
+
+
+class LighterApiError(ApiError):
+    def __init__(self, rep: Response, data: dict):
+        self.code = int(data["code"])
+        message = data.get("message", "Lighter API error")
+        super().__init__(f"{message}: code {self.code}", rep)
+
+    def is_account_missing(self) -> bool:
+        return self.code == 21100
+
+    def is_auth_missing(self) -> bool:
+        return self.code in {20013, 21109}
+
+    def is_deposit_missing(self) -> bool:
+        return self.code == 29404
+
+
+@dataclass(frozen=True)
+class DepositNetwork:
+    chain_id: int
+    usdc: str
+    decimals: int
+    min_amount: Decimal
+
+
+def _deposit_usdc(assets: dict, chain_id: int) -> DepositNetwork:
+    # API metadata must not choose the contract called by a signed deposit transaction.
+    expected = USDC_BY_CHAIN.get(chain_id)
+    if expected is None:
+        raise ApiError(f"USDC deposit contract is not trusted on chain {chain_id}")
+
+    address, decimals = expected
+    asset = utils.first(
+        [x for x in assets.values() if str(x.get("address", "")).lower() == address.lower()]
+    )
+    if (
+        asset is None
+        or asset.get("symbol") != "USDC"
+        or asset.get("decimals") != decimals
+        or asset.get("allowed") is not True
+    ):
+        raise ApiError(f"Unexpected USDC metadata from Fun on chain {chain_id}")
+
+    try:
+        min_amount = Decimal(str(asset["minCheckoutUsd"]))
+    except (InvalidOperation, KeyError):
+        raise ApiError(f"Invalid minimum USDC deposit on chain {chain_id}") from None
+    if not min_amount.is_finite() or min_amount <= 0:
+        raise ApiError(f"Invalid minimum USDC deposit on chain {chain_id}")
+
+    return DepositNetwork(chain_id, address, decimals, min_amount)
 
 
 def to_domain_status(status: str) -> OrderStatus:
@@ -38,6 +107,33 @@ def to_domain_status(status: str) -> OrderStatus:
     if status.startswith("canceled"):
         return OrderStatus.CANCELED
     return OrderStatus.OPEN
+
+
+def _market_order_done(order: Order) -> bool:
+    if order.status == OrderStatus.OPEN:
+        return False
+    if order.status == OrderStatus.CANCELED:
+        raise ApiError(
+            f"Lighter market order {order.id} was canceled: filled {order.filled:g}/{order.size:g}"
+        )
+    if order.filled < order.size:
+        raise ApiError(
+            f"Lighter market order {order.id} was not fully filled: {order.filled:g}/{order.size:g}"
+        )
+
+    return True
+
+
+def _has_integrator_approval(account: dict, config: dict) -> bool:
+    expected = {key: config[value] for key, value in INTEGRATOR_APPROVAL_FIELDS.items()}
+    now = int(time.time() * 1_000)
+    for approval in account.get("approved_integrators", []):
+        expires_at = int(approval.get("approval_expiry", 0))
+        values = utils.pick(approval, *expected)
+        if expires_at > now and values == expected:
+            return True
+
+    return False
 
 
 @bind_log_context
@@ -50,6 +146,7 @@ class LighterClient:
 
     def __init__(self, name: str, privkey: str, proxy: str | None = None):
         self.name = name
+        self.proxy = proxy
         self.account = utils.parse_eth_key(privkey, name)
         self.address = self.account.address
         self.signer = LighterSigner(privkey)
@@ -62,42 +159,85 @@ class LighterClient:
             proxy=proxy,
         )
 
+    async def close(self) -> None:
+        await self.http.close()
+
     async def _call(self, method: HttpMethod, path: str, **kwargs) -> dict:
         rep = await self.http.request(method, path, **kwargs)
-        if not rep.ok:
+        try:
+            res = rep.json()
+        except ValueError:
             raise ApiError("Lighter API error", rep)
 
-        data = rep.json()
-        if data["code"] != 200:
-            message = data.get("message", "Lighter API error")
-            raise ApiError(f"{message}: code {data['code']}")
+        if not rep.ok or res["code"] != 200:
+            raise LighterApiError(rep, res)
 
-        return data
+        return res
 
     async def account_info(self) -> dict:
-        data = await self._call(
-            "GET", "/api/v1/account", params={"by": "l1_address", "value": self.address}
-        )
-        accounts = data["accounts"]
+        pld = {"by": "l1_address", "value": self.address}
+        res = await self._call("GET", "/api/v1/account", params=pld)
+        accounts = res["accounts"]
         if not accounts:
             raise ApiError(f"Lighter account not found for {self.address}")
 
-        account = next(
-            (item for item in accounts if item.get("account_type") == 0),
-            accounts[0],
-        )
+        account = utils.first([x for x in accounts if x.get("account_type") == 0])
+        account = account or accounts[0]
+
         self._account_index = account["account_index"]
         return account
 
+    @ttl_cache(3600)
+    async def _system_config(self) -> dict:
+        return await self._call("GET", "/api/v1/systemConfig")
+
+    async def _get_volume_and_pnl(self, account_index: int) -> tuple[Decimal, Decimal]:
+        hdr = self._get_auth_headers(account_index)
+        pld = {
+            "by": "index",
+            "value": account_index,
+            "resolution": "1d",
+            "start_timestamp": VOLUME_START_TIMESTAMP,
+            "end_timestamp": int(time.time()),
+            "count_back": 0,
+            "ignore_transfers": "false",
+        }
+        res = await self._call("GET", "/api/v1/pnl", params=pld, headers=hdr)
+        history: list[dict] = res["pnl"]
+        volume = sum((Decimal(str(item["volume"])) for item in history), Decimal(0))
+        pnl = Decimal(0)
+        if len(history) > 1:
+            first_pnl = Decimal(str(history[0]["trade_pnl"]))
+            last_pnl = Decimal(str(history[-1]["trade_pnl"]))
+            pnl = last_pnl - first_pnl
+        return volume, pnl
+
+    async def _get_used_referral_code(self, account_index: int) -> str | None:
+        hdr = self._get_auth_headers(account_index)
+        pld = {"l1_address": self.address, "is_eligible": "false"}
+        res = await self._call("GET", "/api/v1/referral/userReferrals", params=pld, headers=hdr)
+        return res.get("used_code") or None
+
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
+        account_index = info["account_index"]
+        volume, pnl = await self._get_volume_and_pnl(account_index)
+        ref_code = await self._get_used_referral_code(account_index)
+
         return ProfileInfo(
             addr=utils.short_addr(self.address),
             balance=Decimal(info["collateral"]),
-            volume=Decimal(0),
-            pnl=Decimal(0),
+            volume=volume,
+            pnl=pnl,
             points=Decimal(0),
+            ref_code=ref_code,
         )
+
+    async def use_referral_code(self, referral_code: str) -> None:
+        account_index = await self._get_account_index()
+        hdr = self._get_auth_headers(account_index)
+        pld = {"l1_address": self.address, "referral_code": referral_code}
+        await self._call("POST", "/api/v1/referral/use", data=pld, headers=hdr)
 
     async def _get_account_index(self) -> int:
         if self._account_index is None:
@@ -108,27 +248,23 @@ class LighterClient:
     async def _get_api_key(
         self, account_index: int, *, headers: dict[str, str] | None = None
     ) -> bytes | None:
-        data = await self._call(
-            "GET",
-            "/api/v1/apikeys",
-            params={"account_index": account_index, "api_key_index": API_KEY_INDEX},
-            headers=headers,
-        )
-        item = next(
-            (item for item in data["api_keys"] if item["api_key_index"] == API_KEY_INDEX),
-            None,
-        )
+        pld = {"account_index": account_index, "api_key_index": API_KEY_INDEX}
+        try:
+            res = await self._call("GET", "/api/v1/apikeys", params=pld, headers=headers)
+        except LighterApiError as error:
+            if error.is_auth_missing():
+                return None
+            raise
+
+        item = utils.first([x for x in res["api_keys"] if x["api_key_index"] == API_KEY_INDEX])
         if item is None:
             return None
 
         return bytes.fromhex(item["public_key"].removeprefix("0x"))
 
     async def _get_next_nonce(self, account_index: int) -> int:
-        data = await self._call(
-            "GET",
-            "/api/v1/nextNonce",
-            params={"account_index": account_index, "api_key_index": API_KEY_INDEX},
-        )
+        pld = {"account_index": account_index, "api_key_index": API_KEY_INDEX}
+        data = await self._call("GET", "/api/v1/nextNonce", params=pld)
         return data["nonce"]
 
     async def _send_change_pub_key(self, account_index: int) -> None:
@@ -142,6 +278,36 @@ class LighterClient:
             nonce,
             expired_at,
             signature,
+        )
+        await self._send_tx(tx)
+
+    async def _send_integrator_approval(self, account_index: int, config: dict) -> None:
+        nonce = await self._get_next_nonce(account_index)
+        now = int(time.time() * 1_000)
+        approval_expiry = now + INTEGRATOR_APPROVAL_LIFETIME_MS
+        values = {
+            "integrator_account_index": int(config["fee_collector_account_index"]),
+            "max_perps_taker_fee": int(config["max_integrator_perps_taker_fee"]),
+            "max_perps_maker_fee": int(config["max_integrator_perps_maker_fee"]),
+            "max_spot_taker_fee": int(config["max_integrator_spot_taker_fee"]),
+            "max_spot_maker_fee": int(config["max_integrator_spot_maker_fee"]),
+        }
+        message = self.signer.approve_integrator_message(
+            account_index,
+            API_KEY_INDEX,
+            nonce,
+            approval_expiry=approval_expiry,
+            **values,
+        )
+        signature = self.account.sign_message(encode_defunct(text=message)).signature.hex()
+        tx = self.signer.sign_approve_integrator(
+            account_index,
+            API_KEY_INDEX,
+            approval_expiry=approval_expiry,
+            nonce=nonce,
+            expired_at=now + TX_LIFETIME_MS,
+            l1_signature=signature,
+            **values,
         )
         await self._send_tx(tx)
 
@@ -171,6 +337,23 @@ class LighterClient:
 
         raise ApiError("Lighter API-key update timed out")
 
+    async def _ensure_integrator_approval(self, account: dict) -> str:
+        config = await self._system_config()
+        if int(config["fee_collector_account_index"]) == 0:
+            return "integrator disabled"
+        if _has_integrator_approval(account, config):
+            return "integrator already approved"
+
+        account_index = account["account_index"]
+        await self._send_integrator_approval(account_index, config)
+        for attempt in range(POLL_ATTEMPTS):
+            if _has_integrator_approval(await self.account_info(), config):
+                return "integrator approved"
+            if attempt < POLL_ATTEMPTS - 1:
+                await asyncio.sleep(POLL_DELAY)
+
+        raise ApiError("Lighter integrator approval timed out")
+
     def _get_auth_headers(self, account_index: int, *, force: bool = False) -> dict[str, str]:
         now = int(time.time())
         if force or self._auth_token is None or self._auth_token.deadline - now < AUTH_REFRESH_SEC:
@@ -181,22 +364,48 @@ class LighterClient:
         return {"PreferAuthServer": "true", "Authorization": self._auth_token.token}
 
     @locked
-    async def login(self, *, force: bool = False) -> None:
-        account_index = await self._get_account_index()
+    async def login(self, *, force: bool = False) -> str:
+        account = await self.account_info()
+        account_index = account["account_index"]
         public_key = await self._get_api_key(account_index)
         if force or public_key != self.signer.public_key:
             await self._send_change_pub_key(account_index)
             await self._wait_for_api_key(account_index)
+            status = "key installed" if public_key is None else "key replaced"
+        else:
+            status = "key already active"
 
-        headers = self._get_auth_headers(account_index, force=force)
-        if await self._get_api_key(account_index, headers=headers) != self.signer.public_key:
+        hdr = self._get_auth_headers(account_index, force=force)
+        if await self._get_api_key(account_index, headers=hdr) != self.signer.public_key:
             raise ApiError("Lighter authentication returned a different API key")
 
+        integrator = await self._ensure_integrator_approval(account)
+        return f"slot {API_KEY_INDEX}, {status}, {integrator}"
+
+    async def auth_ready(self) -> bool:
+        try:
+            account = await self.account_info()
+        except LighterApiError as error:
+            if error.is_account_missing():
+                return False
+            raise
+
+        account_index = account["account_index"]
+        # Another client may replace this slot; our auth token only works with our public key.
+        if await self._get_api_key(account_index) != self.signer.public_key:
+            return False
+
+        hdr = self._get_auth_headers(account_index)
+        return await self._get_api_key(account_index, headers=hdr) == self.signer.public_key
+
     async def registered(self) -> bool:
-        data = await self._call(
-            "GET", "/api/v1/account", params={"by": "l1_address", "value": self.address}
-        )
-        return bool(data["accounts"])
+        try:
+            await self.account_info()
+            return True
+        except LighterApiError as error:
+            if error.is_account_missing():
+                return False
+            raise
 
     # MARK: Markets
 
@@ -206,13 +415,13 @@ class LighterClient:
         return data["order_book_details"]
 
     async def _market(self, symbol: str) -> dict:
-        market = next((item for item in await self._markets() if item["symbol"] == symbol), None)
+        market = utils.first([x for x in await self._markets() if x["symbol"] == symbol])
         if market is None:
             raise ApiError(f"Unknown Lighter symbol: {symbol}")
         return market
 
     async def get_symbols(self) -> list[str]:
-        markets = [item for item in await self._markets() if item["status"] == "active"]
+        markets = [x for x in await self._markets() if x["status"] == "active"]
         markets.sort(key=lambda item: Decimal(str(item["daily_quote_token_volume"])), reverse=True)
         return [item["symbol"] for item in markets]
 
@@ -223,26 +432,31 @@ class LighterClient:
         status = market["status"]
         if reduce_only:
             return status in ("active", "reduce_only")
-        return status == "active" and not market["market_config"]["force_reduce_only"]
+        config = market["market_config"]
+        return status == "active" and not config["force_reduce_only"]
 
     @ttl_cache(5)
     async def get_order_book(self, symbol: str) -> OrderBook:
         market = await self._market(symbol)
-        data = await self._call(
-            "GET", "/api/v1/orderBookOrders", params={"market_id": market["market_id"], "limit": 250}
-        )
+        pld = {"market_id": market["market_id"], "limit": 250}
+        res = await self._call("GET", "/api/v1/orderBookOrders", params=pld)
         multiplier = Decimal(market.get("multiplier") or 1).normalize()
 
         def level(item: dict) -> tuple[Decimal, Decimal]:
-            return Decimal(item["price"]) / multiplier, Decimal(item["remaining_base_amount"]) * multiplier
+            price = Decimal(item["price"]) / multiplier
+            size = Decimal(item["remaining_base_amount"]) * multiplier
+            return price, size
 
         return OrderBook.build(
-            bids=[level(item) for item in data["bids"][:5]],
-            asks=[level(item) for item in data["asks"][:5]],
+            bids=[level(item) for item in res["bids"][:5]],
+            asks=[level(item) for item in res["asks"][:5]],
         )
 
     async def get_bbo(self, symbol: str) -> tuple[Decimal, Decimal]:
         book = await self.get_order_book(symbol)
+        if not book.bids or not book.asks:
+            raise ApiError(f"Lighter order book is empty for {symbol}")
+
         return book.bids[0].price, book.asks[0].price
 
     async def get_price(self, symbol: str) -> Decimal:
@@ -251,15 +465,15 @@ class LighterClient:
 
     async def get_lot_size(self, symbol: str) -> Decimal:
         market = await self._market(symbol)
-        return Decimal(1).scaleb(-market["size_decimals"]) * Decimal(
-            market.get("multiplier") or 1
-        ).normalize()
+        multiplier = Decimal(market.get("multiplier") or 1).normalize()
+        size_step = Decimal(10) ** -market["size_decimals"]
+        return size_step * multiplier
 
     async def get_tick_size(self, symbol: str) -> Decimal:
         market = await self._market(symbol)
-        return Decimal(1).scaleb(-market["price_decimals"]) / Decimal(
-            market.get("multiplier") or 1
-        ).normalize()
+        multiplier = Decimal(market.get("multiplier") or 1).normalize()
+        price_step = Decimal(10) ** -market["price_decimals"]
+        return price_step / multiplier
 
     async def get_min_trade_usd(self, symbol: str) -> Decimal:
         return Decimal((await self._market(symbol))["min_quote_amount"])
@@ -269,9 +483,62 @@ class LighterClient:
     async def balance(self) -> Decimal:
         return Decimal((await self.account_info())["collateral"])
 
+    @ttl_cache(3600)
+    async def deposit_network(self, network: str) -> DepositNetwork:
+        data = await self._call("GET", "/api/v1/deposit/networks")
+        name = network.strip().lower()
+        item = utils.first(
+            [
+                x
+                for x in data["networks"]
+                if str(x["chain_id"]) == name
+                or x["name"].lower() == name
+                or x["name"].lower().startswith(f"{name} ")
+            ]
+        )
+        if item is None:
+            raise ApiError(f"Unsupported Lighter deposit network: {network}")
+
+        rep = await self.http.request(
+            "GET",
+            FUN_ASSETS_URL,
+            headers={"x-api-key": FUN_PUBLIC_API_KEY},
+        )
+        if not rep.ok:
+            raise ApiError("Lighter deposit assets error", rep)
+
+        chain_id = int(item["chain_id"])
+        assets = rep.json().get(str(chain_id))
+        if not isinstance(assets, dict):
+            raise ApiError(f"USDC deposits are unavailable on {item['name']}")
+
+        return _deposit_usdc(assets, chain_id)
+
+    async def get_min_deposit_usd(self, network: str) -> Decimal:
+        return (await self.deposit_network(network)).min_amount
+
+    async def create_deposit_intent(self, chain_id: int, amount: int) -> str:
+        pld = {
+            "chain_id": str(chain_id),
+            "from_addr": self.address,
+            "amount": str(amount),
+            "is_external_deposit": "false",
+        }
+        data = await self._call("POST", "/api/v1/createIntentAddress", data=pld)
+        return data["intent_address"]
+
+    async def latest_deposit(self) -> dict | None:
+        pld = {"l1_address": self.address}
+        try:
+            return await self._call("GET", "/api/v1/deposit/latest", params=pld)
+        except LighterApiError as error:
+            if error.is_deposit_missing():
+                return None
+            raise
+
     async def positions(self) -> list[Position]:
         info = await self.account_info()
-        markets = {item["market_id"]: item for item in await self._markets()}
+        markets = {x["market_id"]: x for x in await self._markets()}
         result = []
         for item in info["positions"]:
             size = Decimal(item["position"])
@@ -308,9 +575,16 @@ class LighterClient:
         return self._last_nonce
 
     async def _load_order(self, item: dict) -> Order:
-        market = next(
-            item_ for item_ in await self._markets() if item_["market_id"] == item["market_index"]
+        market = utils.first(
+            [
+                market
+                for market in await self._markets()
+                if market["market_id"] == item["market_index"]
+            ]
         )
+        if market is None:
+            raise ApiError(f"Unknown Lighter market: {item['market_index']}")
+
         multiplier = Decimal(market.get("multiplier") or 1).normalize()
         is_market = item["type"] == "market"
         return Order(
@@ -326,13 +600,30 @@ class LighterClient:
 
     async def get_order(self, order_id: str) -> Order | None:
         account_index = await self._get_account_index()
-        data = await self._call(
-            "GET",
-            "/api/v1/accountOrders",
-            params={"account_index": account_index, "client_order_indexes": order_id},
-            headers=self._get_auth_headers(account_index),
+        hdr = self._get_auth_headers(account_index)
+        pld = {"account_index": account_index, "client_order_indexes": order_id}
+        res = await self._call("GET", "/api/v1/accountOrders", params=pld, headers=hdr)
+        return await self._load_order(res["orders"][0]) if res["orders"] else None
+
+    async def _wait_for_order(self, order_id: str, *, market: bool) -> Order:
+        last_order = None
+        for attempt in range(POLL_ATTEMPTS):
+            order = await self.get_order(order_id)
+            if order is not None:
+                last_order = order
+                if not market or _market_order_done(order):
+                    return order
+
+            if attempt < POLL_ATTEMPTS - 1:
+                await asyncio.sleep(POLL_DELAY)
+
+        if last_order is None:
+            raise ApiError(f"Lighter order {order_id} not found")
+
+        raise ApiError(
+            f"Lighter market order {order_id} did not finish: "
+            f"filled {last_order.filled:g}/{last_order.size:g}"
         )
-        return await self._load_order(data["orders"][0]) if data["orders"] else None
 
     async def _place_order(
         self,
@@ -368,14 +659,7 @@ class LighterClient:
             nonce + TX_LIFETIME_MS,
         )
         await self._send_tx(tx)
-
-        for attempt in range(POLL_ATTEMPTS):
-            order = await self.get_order(str(nonce))
-            if order is not None:
-                return order
-            if attempt < POLL_ATTEMPTS - 1:
-                await asyncio.sleep(POLL_DELAY)
-        raise ApiError(f"Lighter order {nonce} not found")
+        return await self._wait_for_order(str(nonce), market=order_type == 1)
 
     async def market_order(
         self, symbol: str, side: Side, qty: Decimal, reduce_only: bool = False
@@ -417,14 +701,10 @@ class LighterClient:
 
     async def cancel_all_orders(self) -> int:
         account_index = await self._get_account_index()
-        headers = self._get_auth_headers(account_index)
-        data = await self._call(
-            "GET",
-            "/api/v1/accountActiveOrders",
-            params={"account_index": account_index, "market_type": "all"},
-            headers=headers,
-        )
-        count = len(data["orders"])
+        hdr = self._get_auth_headers(account_index)
+        pld = {"account_index": account_index, "market_type": "all"}
+        res = await self._call("GET", "/api/v1/accountActiveOrders", params=pld, headers=hdr)
+        count = len(res["orders"])
         if count == 0:
             return 0
 
@@ -435,13 +715,8 @@ class LighterClient:
         await self._send_tx(tx)
 
         for attempt in range(POLL_ATTEMPTS):
-            data = await self._call(
-                "GET",
-                "/api/v1/accountActiveOrders",
-                params={"account_index": account_index, "market_type": "all"},
-                headers=headers,
-            )
-            if not data["orders"]:
+            res = await self._call("GET", "/api/v1/accountActiveOrders", params=pld, headers=hdr)
+            if not res["orders"]:
                 return count
             if attempt < POLL_ATTEMPTS - 1:
                 await asyncio.sleep(POLL_DELAY)
@@ -451,7 +726,7 @@ class LighterClient:
 
     async def get_leverage(self, symbol: str) -> int | None:
         info = await self.account_info()
-        position = next((item for item in info["positions"] if item["symbol"] == symbol), None)
+        position = utils.first([x for x in info["positions"] if x["symbol"] == symbol])
         if position is not None:
             return int(Decimal(100) / Decimal(position["initial_margin_fraction"]))
         market = await self._market(symbol)

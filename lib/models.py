@@ -104,4 +104,4 @@ class AccountConfig(BaseModel):
     @field_validator("privkey", mode="before")
     @classmethod
     def decrypt_privkey(cls, v: str) -> str:
-        return decrypt_value(v) if isinstance(v, str) and is_encrypted(v) else v
+        return decrypt_value(v) if is_encrypted(v) else v

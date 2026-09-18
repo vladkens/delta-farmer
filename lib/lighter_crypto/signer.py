@@ -29,14 +29,17 @@ CREATE_ORDER_TX_TYPE = 14
 CANCEL_ORDER_TX_TYPE = 15
 CANCEL_ALL_ORDERS_TX_TYPE = 16
 UPDATE_LEVERAGE_TX_TYPE = 20
+APPROVE_INTEGRATOR_TX_TYPE = 45
 SKIP_NONCE_ATTRIBUTE = 4
 
 MAX_ACCOUNT_INDEX = (1 << 48) - 2
 MAX_API_KEY_INDEX = (1 << 8) - 2
 MAX_MARKET_INDEX = (1 << 15) - 1
+MAX_ORDER_INDEX = (1 << 60) - 1
 MAX_ORDER_VALUE = (1 << 48) - 1
 MAX_ORDER_PRICE = (1 << 32) - 1
 MAX_TIMESTAMP = (1 << 48) - 1
+MAX_FEE = 1_000_000
 
 CURVE_B = make_fp5((0, 263, 0, 0, 0))
 CURVE_B2 = make_fp5((0, 526, 0, 0, 0))
@@ -185,6 +188,44 @@ class LighterSigner:
             "Only sign this message for a trusted client!"
         )
 
+    def approve_integrator_message(
+        self,
+        account_index: int,
+        api_key_index: int,
+        nonce: int,
+        integrator_account_index: int,
+        max_perps_taker_fee: int,
+        max_perps_maker_fee: int,
+        max_spot_taker_fee: int,
+        max_spot_maker_fee: int,
+        approval_expiry: int,
+        *,
+        chain_id: int = LIGHTER_CHAIN_ID,
+    ) -> str:
+        self._validate_indices(account_index, api_key_index, nonce)
+        _check_range("integrator_account_index", integrator_account_index, 0, MAX_ACCOUNT_INDEX)
+        _check_range("max_perps_taker_fee", max_perps_taker_fee, 0, MAX_FEE)
+        _check_range("max_perps_maker_fee", max_perps_maker_fee, 0, MAX_FEE)
+        _check_range("max_spot_taker_fee", max_spot_taker_fee, 0, MAX_FEE)
+        _check_range("max_spot_maker_fee", max_spot_maker_fee, 0, MAX_FEE)
+        _check_range("approval_expiry", approval_expiry, 0, MAX_TIMESTAMP)
+        _check_range("chain_id", chain_id, 0, (1 << 32) - 1)
+
+        return (
+            "Approve Integrator\n\n"
+            f"nonce: 0x{nonce:016x}\n"
+            f"account index: 0x{account_index:016x}\n"
+            f"api key index: 0x{api_key_index:016x}\n"
+            f"integrator account index: 0x{integrator_account_index:016x}\n"
+            f"max perps taker fee: 0x{max_perps_taker_fee:016x}\n"
+            f"max perps maker fee: 0x{max_perps_maker_fee:016x}\n"
+            f"max spot taker fee: 0x{max_spot_taker_fee:016x}\n"
+            f"max spot maker fee: 0x{max_spot_maker_fee:016x}\n"
+            f"approval expiry: 0x{approval_expiry:016x}\n"
+            f"chainId: 0x{chain_id:016x}\n"
+            "Only sign this message for a trusted client!"
+        )
+
     def change_pub_key_hash(
         self,
         account_index: int,
@@ -257,6 +298,70 @@ class LighterSigner:
             "L2TxAttributes": {str(SKIP_NONCE_ATTRIBUTE): 1} if skip_nonce else None,
         }
         return SignedTx(tx_type=CHANGE_PUB_KEY_TX_TYPE, tx_hash=tx_hash.hex(), info=info)
+
+    def sign_approve_integrator(
+        self,
+        account_index: int,
+        api_key_index: int,
+        integrator_account_index: int,
+        max_perps_taker_fee: int,
+        max_perps_maker_fee: int,
+        max_spot_taker_fee: int,
+        max_spot_maker_fee: int,
+        approval_expiry: int,
+        nonce: int,
+        expired_at: int,
+        l1_signature: str,
+    ) -> SignedTx:
+        self.approve_integrator_message(
+            account_index,
+            api_key_index,
+            nonce,
+            integrator_account_index,
+            max_perps_taker_fee,
+            max_perps_maker_fee,
+            max_spot_taker_fee,
+            max_spot_maker_fee,
+            approval_expiry,
+        )
+        _check_range("expired_at", expired_at, 0, MAX_TIMESTAMP)
+
+        l1_signature = l1_signature.removeprefix("0x")
+        try:
+            l1_signature_bytes = bytes.fromhex(l1_signature)
+        except ValueError:
+            raise ValueError("L1 signature must be hexadecimal") from None
+
+        if len(l1_signature_bytes) != 65:
+            raise ValueError(f"L1 signature must be 65 bytes, got {len(l1_signature_bytes)}")
+
+        info: dict[str, object] = {
+            "IntegratorAccountIndex": integrator_account_index,
+            "MaxPerpsTakerFee": max_perps_taker_fee,
+            "MaxPerpsMakerFee": max_perps_maker_fee,
+            "MaxSpotTakerFee": max_spot_taker_fee,
+            "MaxSpotMakerFee": max_spot_maker_fee,
+            "ApprovalExpiry": approval_expiry,
+        }
+        fields = (
+            integrator_account_index,
+            max_perps_taker_fee,
+            max_perps_maker_fee,
+            max_spot_taker_fee,
+            max_spot_maker_fee,
+            approval_expiry,
+        )
+        tx = self._sign_transaction(
+            APPROVE_INTEGRATOR_TX_TYPE,
+            account_index,
+            api_key_index,
+            nonce,
+            expired_at,
+            fields,
+            info,
+        )
+        tx_info = {**tx.info, "L1Sig": f"0x{l1_signature}"}
+        return SignedTx(tx_type=tx.tx_type, tx_hash=tx.tx_hash, info=tx_info)
 
     def sign_create_order(
         self,
@@ -331,7 +436,7 @@ class LighterSigner:
     ) -> SignedTx:
         self._validate_indices(account_index, api_key_index, nonce)
         _check_range("market_index", market_index, 0, MAX_MARKET_INDEX)
-        _check_range("order_index", order_index, 0, (1 << 63) - 1)
+        _check_range("order_index", order_index, 0, MAX_ORDER_INDEX)
         _check_range("expired_at", expired_at, 0, MAX_TIMESTAMP)
         info = {"MarketIndex": market_index, "Index": order_index}
         return self._sign_transaction(
@@ -340,7 +445,7 @@ class LighterSigner:
             api_key_index,
             nonce,
             expired_at,
-            tuple(info.values()),
+            (market_index, order_index),
             info,
         )
 
@@ -360,7 +465,7 @@ class LighterSigner:
             api_key_index,
             nonce,
             expired_at,
-            tuple(info.values()),
+            (0, 0),
             info,
         )
 
@@ -388,7 +493,7 @@ class LighterSigner:
             api_key_index,
             nonce,
             expired_at,
-            tuple(info.values()),
+            (market_index, initial_margin_fraction, 0),
             info,
         )
 
