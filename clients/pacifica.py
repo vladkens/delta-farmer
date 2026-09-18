@@ -124,6 +124,7 @@ class PacificaClient:
 
     def __init__(self, name: str, seckey: str | list[int], proxy: str | None = None):
         self.keypair = utils.parse_sol_key(seckey, name)
+        self.address = str(self.keypair.pubkey())
         self.name = name
         self.http = AsyncHttp(
             baseurl=API_URL,

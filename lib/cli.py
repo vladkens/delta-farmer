@@ -23,6 +23,7 @@ from .errors import AppError
 from .logger import enable_file_logging, logger
 from .models import AccountConfig
 from .proxy import print_proxies
+from .table import AutoTable, Column
 from .telegram import TgConfig
 from .update import latest_release_notice
 
@@ -31,6 +32,15 @@ class LoginClient(Protocol):
     name: str
 
     async def login(self, *, force: bool = False) -> str | None: ...
+
+
+class AddressClient(Protocol):
+    name: str
+    address: str
+
+
+class CliClient(LoginClient, AddressClient, Protocol):
+    pass
 
 
 LOGIN_RETRY_DELAY = 30
@@ -230,7 +240,18 @@ async def _handle_login(clients: Sequence[LoginClient], *, force: bool) -> None:
             pending.append((client, time.monotonic() + LOGIN_RETRY_DELAY, failures))
 
 
-async def create_clients[T: LoginClient](
+def _print_addresses(clients: Sequence[AddressClient]) -> None:
+    table = AutoTable(
+        Column("Account", justify="left"),
+        Column("Address", justify="left"),
+    )
+    for client in clients:
+        table.add_row(client.name, client.address)
+
+    table.print()
+
+
+async def create_clients[T: CliClient](
     args: argparse.Namespace,
     accounts: list[AccountConfig],
     factory: Callable[[AccountConfig], T],
@@ -242,6 +263,10 @@ async def create_clients[T: LoginClient](
 
     if args.command == "login":
         await _handle_login(all_clients, force=args.force)
+        sys.exit(0)
+
+    if args.command == "addresses":
+        _print_addresses(all_clients)
         sys.exit(0)
 
     return all_clients, active_clients
@@ -279,6 +304,7 @@ async def create_cli(
     sub.add_parser("close", help="Close all positions")
     sub.add_parser("positions", help="Show active positions")
     sub.add_parser("info", help="Show accounts info")
+    sub.add_parser("addresses", help="Show configured wallet addresses")
     login_parser = sub.add_parser("login", help="Check and restore account logins")
     login_parser.add_argument("--force", action="store_true", help="Start with a fresh login")
     sub.add_parser("proxy", help="Check configured proxies")
