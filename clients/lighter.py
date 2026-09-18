@@ -16,16 +16,35 @@ from eth_account.messages import encode_defunct
 from lib import utils
 from lib.decorators import bind_log_context, locked, ttl_cache
 from lib.errors import AppError
-from lib.evm import ROBINHOOD_CHAIN_ID, USDG_BY_CHAIN
+from lib.evm import (
+    ROBINHOOD,
+    EvmNetwork,
+    EvmToken,
+    execute_contract_with_erc20_allowance,
+    get_wallet_balances,
+    make_call,
+    to_token_units,
+)
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.lighter_crypto import ROBINHOOD_SIGNING_CHAIN_ID, AuthToken, LighterSigner, SignedTx
+from lib.logger import logger
 from lib.models import AccountConfig
 from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side
+from strategy.deposit import (
+    DepositAsset,
+    DepositBalances,
+    deposit_amount,
+    wait_for_deposit_credit,
+)
 
 API_URL = "https://api.rh.lighter.xyz"
 APP_URL = "https://robinhoodchain.lighter.xyz"
+WS_URL = "wss://api.rh.lighter.xyz/stream"
+
 DEPOSIT_CONTRACT = "0x94bAB9693Ba2f6358507eFfcbd372b0660AFfF9d"
 USDG_ASSET_INDEX = 3
+DEPOSIT_RECEIPT_TIMEOUT_SEC = 5 * 60
+DEPOSIT_ROUTE_TYPE = 0
 
 API_KEY_INDEX = 3
 POLL_ATTEMPTS = 30
@@ -64,33 +83,30 @@ class LighterApiError(ApiError):
 
 @dataclass(frozen=True)
 class DepositNetwork:
-    name: str
-    chain_id: int
-    token: str
-    symbol: str
+    network: EvmNetwork
+    token: EvmToken
     contract: str
     asset_index: int
-    decimals: int
     min_amount: Decimal
 
 
 def _deposit_network(layer1: dict, assets: dict) -> DepositNetwork:
     provider = utils.first(
-        [x for x in layer1["l1_providers"] if x["chainId"] == ROBINHOOD_CHAIN_ID]
+        [x for x in layer1["l1_providers"] if x["chainId"] == ROBINHOOD.chain_id]
     )
     contract = utils.first(
         [x for x in layer1["contract_addresses"] if x["name"] == "ZkLighterContract"]
     )
     asset = utils.first([x for x in assets["asset_details"] if x["symbol"] == "USDG"])
-    expected_token, expected_decimals = USDG_BY_CHAIN[ROBINHOOD_CHAIN_ID]
+    token = ROBINHOOD.tokens["USDG"]
     if (
         provider is None
         or contract is None
         or contract["address"].lower() != DEPOSIT_CONTRACT.lower()
         or asset is None
         or asset["asset_id"] != USDG_ASSET_INDEX
-        or asset["l1_address"].lower() != expected_token.lower()
-        or asset["l1_decimals"] != expected_decimals
+        or asset["l1_address"].lower() != token.address.lower()
+        or asset["l1_decimals"] != token.decimals
     ):
         raise ApiError("Unexpected Robinhood Lighter deposit metadata")
 
@@ -102,13 +118,10 @@ def _deposit_network(layer1: dict, assets: dict) -> DepositNetwork:
         raise ApiError("Invalid minimum USDG deposit")
 
     return DepositNetwork(
-        name="robinhood",
-        chain_id=ROBINHOOD_CHAIN_ID,
-        token=expected_token,
-        symbol="USDG",
+        network=ROBINHOOD,
+        token=token,
         contract=DEPOSIT_CONTRACT,
         asset_index=USDG_ASSET_INDEX,
-        decimals=expected_decimals,
         min_amount=min_amount,
     )
 
@@ -205,7 +218,17 @@ class LighterClient:
     async def _system_config(self) -> dict:
         return await self._call("GET", "/api/v1/systemConfig")
 
-    async def _get_volume_and_pnl(self, account_index: int) -> tuple[Decimal, Decimal]:
+    async def _get_volume(self, account_index: int) -> Decimal:
+        auth = self._get_auth_headers(account_index)["Authorization"]
+        channel = f"account_all_trades/{account_index}"
+        async with self.http.session.ws_connect(WS_URL) as ws:
+            await ws.send_json({"type": "subscribe", "channel": channel, "auth": auth})
+            while True:
+                data = await ws.recv_json(timeout=30)
+                if data.get("type") == "subscribed/account_all_trades":
+                    return Decimal(str(data["total_volume"]))
+
+    async def _get_pnl(self, account_index: int) -> Decimal:
         hdr = self._get_auth_headers(account_index)
         pld = {
             "by": "index",
@@ -218,13 +241,12 @@ class LighterClient:
         }
         res = await self._call("GET", "/api/v1/pnl", params=pld, headers=hdr)
         history: list[dict] = res["pnl"]
-        volume = sum((Decimal(str(item["volume"])) for item in history), Decimal(0))
         pnl = Decimal(0)
         if len(history) > 1:
             first_pnl = Decimal(str(history[0]["trade_pnl"]))
             last_pnl = Decimal(str(history[-1]["trade_pnl"]))
             pnl = last_pnl - first_pnl
-        return volume, pnl
+        return pnl
 
     async def _get_used_referral_code(self, account_index: int) -> str | None:
         hdr = self._get_auth_headers(account_index)
@@ -246,7 +268,8 @@ class LighterClient:
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
         account_index = info["account_index"]
-        volume, pnl = await self._get_volume_and_pnl(account_index)
+        volume = await self._get_volume(account_index)
+        pnl = await self._get_pnl(account_index)
         ref_code = await self._get_used_referral_code(account_index)
         points, rank = await self._get_points()
 
@@ -526,11 +549,54 @@ class LighterClient:
     async def balance(self) -> Decimal:
         return Decimal((await self.account_info())["collateral"])
 
+    async def deposit_balance(self) -> Decimal:
+        return await self.balance() if await self.registered() else Decimal(0)
+
     @ttl_cache(3600)
     async def deposit_network(self) -> DepositNetwork:
         layer1 = await self._call("GET", "/api/v1/layer1BasicInfo")
         assets = await self._call("GET", "/api/v1/assetDetails")
         return _deposit_network(layer1, assets)
+
+    async def deposit_asset(self) -> DepositAsset:
+        info = await self.deposit_network()
+        return DepositAsset(self.exchange.title(), info.network, info.token, info.min_amount)
+
+    async def deposit_balances(self) -> DepositBalances:
+        info = await self.deposit_network()
+        balance, wallet_balances = await asyncio.gather(
+            self.deposit_balance(),
+            get_wallet_balances(info.network, info.token, self.address, self.proxy),
+        )
+        wallet, native = wallet_balances
+        return DepositBalances(balance, wallet, native)
+
+    async def deposit(self, amount: Decimal) -> str:
+        info = await self.deposit_network()
+        amount = deposit_amount(amount, info.token.decimals, info.min_amount)
+        amount_units = to_token_units(amount, info.token)
+        balance = await self.deposit_balance()
+        call = make_call(
+            info.contract,
+            "deposit",
+            ["address", "uint16", "uint8", "uint256"],
+            [self.address, info.asset_index, DEPOSIT_ROUTE_TYPE, amount_units],
+        )
+        tx_hash, fee = await execute_contract_with_erc20_allowance(
+            info.network,
+            self.account,
+            info.token,
+            info.contract,
+            amount_units,
+            call,
+            self.proxy,
+            DEPOSIT_RECEIPT_TIMEOUT_SEC,
+        )
+        logger.info(f"Deposit tx: {tx_hash}; fee: {fee:,.8f} ETH")
+        logger.info("Deposit tx confirmed; waiting for credit")
+        await wait_for_deposit_credit(self, balance + amount, tx_hash)
+
+        return tx_hash
 
     async def get_min_deposit_usd(self) -> Decimal:
         return (await self.deposit_network()).min_amount

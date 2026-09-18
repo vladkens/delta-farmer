@@ -1,16 +1,22 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | If it compiles, ship it
 import asyncio
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Self
 
-from eth_account.messages import encode_defunct
+from eth_account.messages import encode_defunct, encode_typed_data
 from pydantic import AliasPath, BaseModel, ConfigDict, Field
 
 from lib import utils
 from lib.decorators import bind_log_context, locked, retry, retry_on, ttl_cache
+from lib.evm import (
+    ARBITRUM,
+    get_wallet_balances,
+    to_token_units,
+)
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -24,10 +30,29 @@ from strategy import (
     Side,
     TradingClient,
 )
+from strategy.deposit import (
+    DEPOSIT_CREDIT_TIMEOUT_SEC,
+    DEPOSIT_POLL_DELAY,
+    DepositAsset,
+    DepositBalances,
+    deposit_amount,
+)
 from strategy.execution import EntryQuality
 
 API_URL = "https://omni.variational.io/api"
 APP_URL = "https://omni.variational.io"
+
+USDC = ARBITRUM.tokens["USDC"]
+OMNI_DEPOSIT_ASSET = DepositAsset("Omni", ARBITRUM, USDC)
+PERMIT_LIFETIME_SEC = 300
+PERMIT_CLOCK_SKEW_SEC = 60
+USDC_PERMIT_FIELDS = (
+    ("owner", "address"),
+    ("spender", "address"),
+    ("value", "uint256"),
+    ("nonce", "uint256"),
+    ("deadline", "uint256"),
+)
 
 _PAGINATION_DELAY = 1.0
 # Season was announced on Dec 17, but Omni UI labels week 1 as starting 6 days earlier.
@@ -117,6 +142,20 @@ class OmniCompetitionStatus(BaseModel):
     volume_threshold: Decimal
     ongoing: bool
     user: OmniCompetitionUser | None = None
+
+
+class OmniSettlementPool(BaseModel):
+    id: str
+    pool_address: str
+
+
+class OmniPoolDetails(BaseModel):
+    balance: Decimal
+    max_withdrawable_amount: Decimal
+
+
+def _int_value(value: Any) -> int:
+    return int(value, 0) if isinstance(value, str) else int(value)
 
 
 # MARK: Client
@@ -255,6 +294,165 @@ class OmniClient:
     async def balance(self) -> Decimal:
         res = await self._call("GET", "/portfolio?compute_margin=true")
         return Decimal(res["balance"])
+
+    async def settlement_pool(self) -> OmniSettlementPool:
+        res = await self._call("GET", "/settlement_pools/existing")
+        return OmniSettlementPool(**res)
+
+    async def pool_details(self) -> OmniPoolDetails:
+        res = await self._call("GET", "/settlement_pools/details")
+        return OmniPoolDetails(**res)
+
+    async def deposit_balance(self) -> Decimal:
+        return (await self.pool_details()).balance
+
+    async def deposit_asset(self) -> DepositAsset:
+        return OMNI_DEPOSIT_ASSET
+
+    async def deposit_balances(self) -> DepositBalances:
+        if not await self.registered():
+            return DepositBalances(Decimal(0), Decimal(0), unavailable="not registered")
+
+        balance, wallet_balances = await asyncio.gather(
+            self.deposit_balance(),
+            get_wallet_balances(ARBITRUM, USDC, self.address, self.proxy),
+        )
+        wallet, native = wallet_balances
+        return DepositBalances(balance, wallet, native)
+
+    async def wallet_usdc_balance(self) -> Decimal:
+        pld = {"ownerAddress": self.address}
+        res = await self._call("POST", "/on_chain/usdc/balance", json=pld)
+        try:
+            return Decimal(_int_value(res)).scaleb(-USDC.decimals)
+        except (TypeError, ValueError):
+            raise ApiError("Invalid Omni USDC balance") from None
+
+    async def _usdc_allowance(self, spender: str) -> int:
+        pld = {"owner": self.address, "spender": spender}
+        res = await self._call("POST", "/on_chain/usdc/allowance", json=pld)
+        try:
+            return _int_value(res)
+        except (TypeError, ValueError):
+            raise ApiError("Invalid Omni USDC allowance") from None
+
+    def _validate_permit(self, permit: dict, pool: OmniSettlementPool, amount: Decimal) -> None:
+        try:
+            domain = permit["domain"]
+            message = permit["message"]
+            primary_type = permit["primaryType"]
+            chain_id = _int_value(domain["chainId"])
+            contract = domain["verifyingContract"].lower()
+            owner = message["owner"].lower()
+            spender = message["spender"].lower()
+            value = _int_value(message["value"])
+            deadline = _int_value(message["deadline"])
+            fields = tuple((item["name"], item["type"]) for item in permit["types"]["Permit"])
+            expected_value = to_token_units(amount, USDC)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ApiError("Unexpected Omni USDC permit: invalid payload") from None
+
+        if primary_type != "Permit":
+            raise ApiError("Unexpected Omni USDC permit: primary type")
+        if chain_id != ARBITRUM.chain_id:
+            raise ApiError("Unexpected Omni USDC permit: chain")
+        if contract != USDC.address.lower():
+            raise ApiError("Unexpected Omni USDC permit: contract")
+        if owner != self.address.lower():
+            raise ApiError("Unexpected Omni USDC permit: owner")
+        if spender != pool.pool_address.lower():
+            raise ApiError("Unexpected Omni USDC permit: spender")
+        if value != expected_value:
+            raise ApiError("Unexpected Omni USDC permit: amount")
+        if fields != USDC_PERMIT_FIELDS:
+            raise ApiError("Unexpected Omni USDC permit: fields")
+
+        now = int(time.time())
+        if not now < deadline <= now + PERMIT_LIFETIME_SEC + PERMIT_CLOCK_SKEW_SEC:
+            raise ApiError("Unexpected Omni USDC permit: deadline")
+
+    async def ensure_deposit_allowance(
+        self,
+        pool: OmniSettlementPool,
+        amount: Decimal,
+    ) -> None:
+        units = to_token_units(amount, USDC)
+        if await self._usdc_allowance(pool.pool_address) >= units:
+            return
+
+        amount = Decimal(units).scaleb(-USDC.decimals)
+        pld = {
+            "allowance": {"type": "decimal", "value": format(amount, "f")},
+            "pool_address": pool.pool_address,
+            "seconds_until_expiry": PERMIT_LIFETIME_SEC,
+        }
+        permit = await self._call("POST", "/on_chain/permit/template", json=pld)
+        self._validate_permit(permit, pool, amount)
+        signature = self.account.sign_message(encode_typed_data(full_message=permit)).signature
+        pld = {"message": permit, "signature": "0x" + bytes(signature).hex()}
+        res = await self._call(
+            "POST",
+            "/on_chain/permit",
+            json=pld,
+            replay_after_cf=False,
+            retry=False,
+        )
+        if res is not True:
+            raise ApiError("Omni USDC permit failed")
+
+    async def create_deposit(self, pool: OmniSettlementPool, amount: Decimal) -> str:
+        units = to_token_units(amount, USDC)
+        amount = Decimal(units).scaleb(-USDC.decimals)
+        pld = {
+            "asset": USDC.symbol,
+            "qty": format(amount, "f"),
+            "target_pool_location": pool.id,
+            "transfer_type": "deposit",
+        }
+        res = await self._call(
+            "POST",
+            "/transfers/insert_pending_transfer",
+            json=pld,
+            replay_after_cf=False,
+            retry=False,
+        )
+        transfer_id = res.get("id") if isinstance(res, dict) else None
+        if not isinstance(transfer_id, str) or not transfer_id:
+            raise ApiError("Invalid Omni deposit response")
+
+        return transfer_id
+
+    async def wait_for_transfer(self, transfer_id: str) -> None:
+        deadline = time.monotonic() + DEPOSIT_CREDIT_TIMEOUT_SEC
+        pld = {"order_by": "created_at", "order": "desc", "limit": 50, "offset": 0}
+        while time.monotonic() < deadline:
+            res = await self._call("GET", "/transfers", params=pld)
+            transfer = utils.first(
+                [item for item in res.get("result", []) if item.get("id") == transfer_id]
+            )
+            status = transfer.get("status") if transfer else None
+            if status == "confirmed":
+                return
+            if status in {"cancelled", "failed", "rejected"}:
+                raise ApiError(f"Omni deposit {status}: {transfer_id}")
+
+            await asyncio.sleep(DEPOSIT_POLL_DELAY)
+
+        raise ApiError(f"Omni deposit confirmation timed out: {transfer_id}")
+
+    async def deposit(self, amount: Decimal) -> str:
+        amount = deposit_amount(amount, USDC.decimals)
+        pool = await self.settlement_pool()
+        wallet = await self.wallet_usdc_balance()
+        if wallet < amount:
+            network = ARBITRUM.name.title()
+            raise ApiError(f"Insufficient {USDC.symbol} on {network}: {wallet} < {amount}")
+
+        await self.ensure_deposit_allowance(pool, amount)
+        transfer_id = await self.create_deposit(pool, amount)
+        logger.info(f"Deposit submitted: {transfer_id}; waiting for confirmation")
+        await self.wait_for_transfer(transfer_id)
+        return transfer_id
 
     @ttl_cache(600)
     async def supported_assets(self) -> dict[str, OmniSupportedAsset]:

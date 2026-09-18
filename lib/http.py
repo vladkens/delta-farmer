@@ -125,12 +125,20 @@ class AsyncHttp:
 
         return f"{self.baseurl.rstrip('/')}/{url.lstrip('/')}"
 
-    async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
+    async def request(
+        self,
+        method: HttpMethod,
+        url: str,
+        *,
+        retry: bool = True,
+        **kwargs,
+    ) -> Response:
         self.load_cookies()
 
         fullurl = self._build_url(url)
         logname = f"Http {method} {url.split('?')[0]}"
-        max_retries, retries = 9, 0
+        max_attempts = 9 if retry else 1
+        attempts = 0
         first_error_logged = False
         while True:
             try:
@@ -139,15 +147,15 @@ class AsyncHttp:
                 logger.trace(f">> {logname} response: {rep.status_code} {rep.text}")
                 return rep
             except (errors.CurlError, errors.RequestsError) as e:
-                retries += 1
-                if retries >= max_retries:
-                    logger.error(f"{logname} failed after {max_retries} retries.")
+                attempts += 1
+                if attempts >= max_attempts:
+                    logger.error(f"{logname} failed after {attempts} attempts.")
                     raise e
 
                 if not first_error_logged:
                     logger.debug(f"{logname} network error ({type(e)}), retrying...")
                     first_error_logged = True
 
-                wait_sec = 0.75 * retries
+                wait_sec = 0.75 * attempts
                 await asyncio.sleep(wait_sec)
                 continue

@@ -16,11 +16,12 @@ from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
-from strategy import StrategyConfig, load_config
+from strategy import load_config
+from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups
 
 
-class OmniConfig(StrategyConfig):
+class OmniConfig(DepositConfig):
     captcha_key: SecretStr = Field(default=SecretStr(""), repr=False)
 
     @classmethod
@@ -243,7 +244,7 @@ async def main():
         "omni",
         "configs/omni.toml",
         ["privkey", "captcha_key"],
-        custom_commands={"competition": setup_competition_cli},
+        custom_commands={"competition": setup_competition_cli, "deposit": lambda _: None},
     )
     cfg = OmniConfig.load(cli.config)
     if key := cfg.captcha_key.get_secret_value():
@@ -267,6 +268,8 @@ async def main():
                 await join_competition(all_accs)
             else:
                 await print_competition_status(all_accs)
+        case "deposit":
+            await run_deposits(act_accs, cfg)
 
 
 if __name__ == "__main__":

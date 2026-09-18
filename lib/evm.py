@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
@@ -10,29 +10,64 @@ from eth_account.types import TransactionDictType
 from eth_utils import keccak, to_checksum_address
 
 from .http import ApiError, AsyncHttp
+from .logger import logger
 
 MAX_TX_FEE_WEI = 10**16
-ERC20_TRANSFER_GAS_LIMIT = 100_000
-ROBINHOOD_CHAIN_ID = 4663
-RPC_URLS = {
-    ROBINHOOD_CHAIN_ID: "https://rpc.mainnet.chain.robinhood.com",
-    8453: "https://mainnet.base.org",
-    42161: "https://arb1.arbitrum.io/rpc",
-    43114: "https://api.avax.network/ext/bc/C/rpc",
-    999: "https://rpc.hyperliquid.xyz/evm",
-}
 
-# USDC contract addresses and decimals by EVM chain ID.
-USDC_BY_CHAIN = {
-    999: ("0xb88339CB7199b77E23DB6E890353E22632Ba630f", 6),
-    8453: ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
-    42161: ("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6),
-}
 
-# USDG contract addresses and decimals by EVM chain ID.
-USDG_BY_CHAIN = {
-    ROBINHOOD_CHAIN_ID: ("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", 6),
-}
+@dataclass(frozen=True)
+class EvmToken:
+    symbol: str
+    address: str
+    decimals: int
+
+
+@dataclass(frozen=True)
+class EvmNetwork:
+    name: str
+    chain_id: int
+    rpc_url: str
+    tokens: Mapping[str, EvmToken]
+
+
+ROBINHOOD = EvmNetwork(
+    name="robinhood",
+    chain_id=4663,
+    rpc_url="https://rpc.mainnet.chain.robinhood.com",
+    tokens={
+        "USDG": EvmToken("USDG", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", 6),
+    },
+)
+BASE = EvmNetwork(
+    name="base",
+    chain_id=8453,
+    rpc_url="https://mainnet.base.org",
+    tokens={
+        "USDC": EvmToken("USDC", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
+    },
+)
+ARBITRUM = EvmNetwork(
+    name="arbitrum",
+    chain_id=42161,
+    rpc_url="https://arb1.arbitrum.io/rpc",
+    tokens={
+        "USDC": EvmToken("USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6),
+    },
+)
+AVALANCHE = EvmNetwork(
+    name="avalanche",
+    chain_id=43114,
+    rpc_url="https://api.avax.network/ext/bc/C/rpc",
+    tokens={},
+)
+HYPERLIQUID = EvmNetwork(
+    name="hyperliquid",
+    chain_id=999,
+    rpc_url="https://rpc.hyperliquid.xyz/evm",
+    tokens={
+        "USDC": EvmToken("USDC", "0xb88339CB7199b77E23DB6E890353E22632Ba630f", 6),
+    },
+)
 
 
 class RPCError(ApiError):
@@ -76,11 +111,8 @@ class RPC:
         return body["result"]
 
 
-def create_rpc(chain_id: int, network: str, proxy: str | None = None) -> RPC:
-    url = RPC_URLS.get(chain_id)
-    if url is None:
-        raise ApiError(f"No public RPC configured for {network}")
-    return RPC(url, network, proxy)
+def create_rpc(network: EvmNetwork, proxy: str | None = None) -> RPC:
+    return RPC(network.rpc_url, network.name, proxy)
 
 
 async def check_chain(rpc: RPC, expected: int) -> None:
@@ -97,6 +129,14 @@ class SignedTransaction:
 
 def to_addr(address: str | int) -> str:
     return to_checksum_address(f"0x{address:040x}" if isinstance(address, int) else address)
+
+
+def to_token_units(amount: Decimal, token: EvmToken) -> int:
+    units = amount.scaleb(token.decimals)
+    if amount <= 0 or not amount.is_finite() or units != units.to_integral_value():
+        raise ValueError(f"Invalid {token.symbol} amount: {amount}")
+
+    return int(units)
 
 
 def make_call(address: str, name: str, types: Sequence[str] = (), args: Sequence = ()) -> dict:
@@ -138,17 +178,15 @@ async def get_token_allowance(rpc: RPC, token: str, owner: str, spender: str) ->
 
 async def check_token_balance(
     rpc: RPC,
-    token: str,
+    token: EvmToken,
     owner: str,
     amount: int,
-    decimals: int,
-    symbol: str,
 ) -> None:
-    balance = await get_token_bal(rpc, token, owner)
+    balance = await get_token_bal(rpc, token.address, owner)
     if balance < amount:
-        unit = Decimal(1).scaleb(-decimals)
+        unit = Decimal(1).scaleb(-token.decimals)
         raise ApiError(
-            f"Insufficient {symbol} on {rpc.network}: "
+            f"Insufficient {token.symbol} on {rpc.network}: "
             f"{Decimal(balance) * unit} < {Decimal(amount) * unit}"
         )
 
@@ -158,18 +196,16 @@ async def get_native_bal(rpc: RPC, owner: str) -> int:
 
 
 async def get_wallet_balances(
-    chain_id: int,
-    network: str,
-    token: str,
-    decimals: int,
+    network: EvmNetwork,
+    token: EvmToken,
     owner: str,
     proxy: str | None = None,
 ) -> tuple[Decimal, Decimal]:
-    async with create_rpc(chain_id, network, proxy) as rpc:
-        await check_chain(rpc, chain_id)
-        token_balance = await get_token_bal(rpc, token, owner)
+    async with create_rpc(network, proxy) as rpc:
+        await check_chain(rpc, network.chain_id)
+        token_balance = await get_token_bal(rpc, token.address, owner)
         native_balance = await get_native_bal(rpc, owner)
-    return Decimal(token_balance).scaleb(-decimals), Decimal(native_balance).scaleb(-18)
+    return Decimal(token_balance).scaleb(-token.decimals), Decimal(native_balance).scaleb(-18)
 
 
 async def dynamic_fee_params(rpc: RPC) -> dict:
@@ -191,18 +227,6 @@ async def dynamic_fee_params(rpc: RPC) -> dict:
 
 def fee_cap(tx: dict) -> int:
     return int(tx["maxFeePerGas"] if "maxFeePerGas" in tx else tx["gasPrice"])
-
-
-async def estimate_network_fee(
-    chain_id: int,
-    network: str,
-    gas_limit: int,
-    proxy: str | None = None,
-) -> Decimal:
-    async with create_rpc(chain_id, network, proxy) as rpc:
-        await check_chain(rpc, chain_id)
-        fee = gas_limit * fee_cap(await dynamic_fee_params(rpc))
-    return Decimal(fee).scaleb(-18)
 
 
 async def prepare_tx(rpc: RPC, account: LocalAccount, call: dict) -> dict:
@@ -274,15 +298,53 @@ async def send_contract(
     return signed.hash, fee_native
 
 
-async def approve_erc20(
+async def ensure_erc20_allowance(
     rpc: RPC,
     account: LocalAccount,
-    token: str,
+    token: EvmToken,
     spender: str,
     amount: int,
+    receipt_timeout: float = 180,
+) -> tuple[str, Decimal] | None:
+    if amount <= 0:
+        raise ValueError("Approval amount must be positive")
+    if await get_token_allowance(rpc, token.address, account.address, spender) >= amount:
+        return None
+
+    call = make_call(token.address, "approve", ["address", "uint256"], [spender, amount])
+    tx_hash, fee = await send_contract(rpc, account, call)
+    await wait_receipt(rpc, tx_hash, receipt_timeout)
+    return tx_hash, fee
+
+
+async def execute_contract_with_erc20_allowance(
+    network: EvmNetwork,
+    account: LocalAccount,
+    token: EvmToken,
+    spender: str,
+    amount: int,
+    call: dict,
+    proxy: str | None = None,
+    receipt_timeout: float = 180,
 ) -> tuple[str, Decimal]:
-    call = make_call(token, "approve", ["address", "uint256"], [to_addr(spender), amount])
-    return await send_contract(rpc, account, call)
+    async with create_rpc(network, proxy) as rpc:
+        await check_chain(rpc, network.chain_id)
+        await check_token_balance(rpc, token, account.address, amount)
+        approval = await ensure_erc20_allowance(
+            rpc,
+            account,
+            token,
+            spender,
+            amount,
+            receipt_timeout,
+        )
+        if approval:
+            tx_hash, fee = approval
+            logger.info(f"Approval tx: {tx_hash}; fee: {fee:,.8f} ETH")
+
+        tx_hash, fee = await send_contract(rpc, account, call)
+        await wait_receipt(rpc, tx_hash, receipt_timeout)
+        return tx_hash, fee
 
 
 async def transfer_erc20(
