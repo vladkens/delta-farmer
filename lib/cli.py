@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import glob
+import importlib
 import os
 import re
 import subprocess
@@ -10,7 +11,7 @@ import sys
 import time
 import tomllib
 from collections.abc import Callable, Coroutine, Sequence
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +38,36 @@ LOGIN_PROXY_WARNING_ATTEMPTS = 3
 
 def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
+
+
+def confirm(label: str) -> bool:
+    prompt = f"{label} [y/N]: "
+    if not sys.stdin.isatty():
+        try:
+            return input(prompt).strip().lower() == "y"
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    try:
+        termios = cast(Any, importlib.import_module("termios"))
+        tty = cast(Any, importlib.import_module("tty"))
+    except ImportError:
+        try:
+            return input(prompt).strip().lower() == "y"
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        return sys.stdin.read(1).strip().lower() == "y"
+    except KeyboardInterrupt:
+        return False
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+        print()
 
 
 def _env_enabled(name: str) -> bool:
@@ -300,9 +331,21 @@ async def create_cli(
     return args
 
 
+async def _run_app(coro: Coroutine) -> None:
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        await telemetry.flush()
+        raise
+    else:
+        await telemetry.flush()
+
+
 def run_app(coro: Coroutine) -> None:
     try:
-        asyncio.run(coro)
+        asyncio.run(_run_app(coro))
     except AppError as e:
         logger.error(str(e))
     except KeyboardInterrupt:

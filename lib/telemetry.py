@@ -40,13 +40,9 @@ async def _async_flush() -> None:
 
 
 async def _flush_loop(interval: int) -> None:
-    try:
-        while True:
-            await asyncio.sleep(interval)
-            await _async_flush()
-    except asyncio.CancelledError:
-        await _async_flush()  # final flush before shutdown
-        raise
+    while True:
+        await asyncio.sleep(interval)
+        await _async_flush()
 
 
 async def _heartbeat_loop(interval: int) -> None:
@@ -97,3 +93,7 @@ def track(event: str, props: dict | None = None) -> None:
     ts = datetime.now(UTC).isoformat()
     props = {**_context, **(props or {})}
     _queue.append({"event": event, "distinct_id": _anon_id(), "timestamp": ts, "properties": props})
+
+
+async def flush() -> None:
+    await _async_flush()
