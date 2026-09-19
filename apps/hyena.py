@@ -10,7 +10,7 @@ from rich.console import Console
 
 from clients.hyena import HyenaClient
 from clients.hyperliquid import migrate_hyperliquid_accounts, warn_legacy_hyperliquid_accounts
-from lib.cli import create_cli, create_clients, noop_command, run_app
+from lib.cli import create_cli, create_clients, noop_command, print_deprecation_notice, run_app
 from lib.evm_cli import run_evm
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -77,7 +77,7 @@ async def print_info(accs: list[HyenaClient]):
         names = ", ".join(name for name, _ in claimable_rewards)
         print(
             f"* Claimable Hyena rewards: {amount:,.4f} USDE ({names}). "
-            "Run `uv run apps/hyena.py reward claim`."
+            "Run `uv run apps/hyena.py claim`."
         )
 
 
@@ -152,12 +152,6 @@ async def print_stats(
     render_stats(periods_data, periods_to_show, points_fmt="{:,.0f}", pprice_fmt="{:,.4f}")
 
 
-def setup_reward_cli(parser):
-    sub = parser.add_subparsers(dest="reward_action")
-    sub.required = True
-    sub.add_parser("claim", help="Claim rewards")
-
-
 async def claim_rewards(accs: list[HyenaClient]):
     async def row(acc: HyenaClient):
         rewards = await acc.system_rewards()
@@ -193,14 +187,17 @@ async def main():
         "configs/hyena.toml",
         ["privkey"],
         custom_commands={
+            "claim": lambda _: None,
             "migrate": lambda _: None,
-            "reward": setup_reward_cli,
         },
     )
     cfg = StrategyConfig.load(cli.config)
     cfg.symbols = _normalize_symbols(cfg.symbols)
 
     all_accs, act_accs = await create_clients(cli, cfg.accounts, HyenaClient.from_config)
+    print_deprecation_notice(
+        "HyENA closed; removed next release. https://www.chaincatcher.com/en/article/2286294"
+    )
 
     match cli.command:
         case "info":
@@ -209,7 +206,7 @@ async def main():
             await print_positions(act_accs)
         case "stats":
             await print_stats(all_accs, period=cli.group, filter_period=cli.filter, force=cli.force)
-        case "reward":
+        case "claim":
             await claim_rewards(all_accs)
         case "close":
             await close_all(act_accs)

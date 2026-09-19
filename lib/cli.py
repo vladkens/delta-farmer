@@ -14,6 +14,7 @@ from collections.abc import Callable, Coroutine, Sequence
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
+from rich.console import Console
 
 from . import support, telemetry
 from . import telegram as tg
@@ -26,6 +27,8 @@ from .proxy import print_proxies
 from .table import AutoTable, Column
 from .telegram import TgConfig
 from .update import latest_release_notice
+
+console = Console(stderr=True)
 
 
 class LoginClient(Protocol):
@@ -49,6 +52,15 @@ LOGIN_PROXY_WARNING_ATTEMPTS = 3
 
 def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
+
+
+def print_deprecation_notice(message: str) -> None:
+    eprint()
+    console.print(
+        f"!! DEPRECATED CLIENT: {message}",
+        style="bold orange3",
+        highlight=False,
+    )
 
 
 def noop_command(exchange: str, command: str) -> None:

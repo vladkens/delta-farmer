@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lib import utils
 from lib.decorators import bind_log_context, retry, ttl_cache
+from lib.evm import RPC, check_chain, make_call, send_contract, wait_receipt
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -19,6 +20,12 @@ from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side,
 API_URL = "https://api.ethereal.trade/v1"
 APP_URL = "https://app.ethereal.trade"
 ARCHIVE_URL = "https://archive.ethereal.trade/v1"
+MERKL_API_URL = "https://api.merkl.xyz/v4"
+ETHEREAL_RPC_URL = "https://rpc.ethereal.trade"
+ETHEREAL_EXPLORER_URL = "https://explorer.ethereal.trade"
+ETHEREAL_CHAIN_ID = 5_064_014
+MERKL_DISTRIBUTOR = "0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae"
+REWARD_RECEIPT_TIMEOUT_SEC = 3 * 60
 _POINTS_GENESIS = datetime(2025, 12, 18, tzinfo=UTC)
 
 NativeSide = Literal["buy", "sell"]
@@ -92,6 +99,41 @@ class EtherealPoint(BaseModel):
     @property
     def total_points(self) -> Decimal:
         return self.points + self.referral_points
+
+
+class EtherealRewardToken(BaseModel):
+    address: str
+    decimals: int
+    symbol: str
+
+
+class EtherealReward(BaseModel):
+    distribution_chain_id: int = Field(alias="distributionChainId")
+    recipient: str
+    amount: int
+    claimed: int
+    pending: int = 0
+    proofs: list[str] = Field(default_factory=list)
+    token: EtherealRewardToken
+
+    def to_amount(self, value: int) -> Decimal:
+        return Decimal(value).scaleb(-self.token.decimals)
+
+    @property
+    def total(self) -> Decimal:
+        return self.to_amount(self.amount + self.pending)
+
+    @property
+    def claimed_amount(self) -> Decimal:
+        return self.to_amount(self.claimed)
+
+    @property
+    def claimable(self) -> Decimal:
+        return self.to_amount(max(self.amount - self.claimed, 0))
+
+    @property
+    def pending_amount(self) -> Decimal:
+        return self.to_amount(self.pending)
 
 
 # MARK: Client
@@ -425,6 +467,79 @@ class EtherealClient:
         pld = {"address": self.address, "season": season, "epoch": epoch}
         res = await self._call("GET", "/points", params=pld, headers=hdr)
         return [EtherealPoint.model_validate(x) for x in res.get("data", [])]
+
+    async def rewards(self, claimable_only: bool = False) -> list[EtherealReward]:
+        pld = {
+            "chainId": ETHEREAL_CHAIN_ID,
+            "breakdownPage": 0,
+            "reloadChainId": ETHEREAL_CHAIN_ID,
+            "claimableOnly": str(claimable_only).lower(),
+        }
+        path = f"/users/{self.address}/rewards"
+        async with AsyncHttp(
+            baseurl=MERKL_API_URL,
+            headers={"Origin": APP_URL, "Referer": f"{APP_URL}/"},
+        ) as http:
+            rep = await http.request("GET", path, params=pld)
+            if not rep.ok:
+                raise ApiError("Merkl API error", rep)
+            res = rep.json()
+
+        return [
+            EtherealReward.model_validate(reward)
+            for group in res
+            if group.get("chain", {}).get("id") == ETHEREAL_CHAIN_ID
+            for reward in group.get("rewards", [])
+        ]
+
+    def reward_claim_call(self, rewards: list[EtherealReward]) -> dict:
+        if not rewards:
+            raise ValueError("No claimable Ethereal rewards")
+
+        users = []
+        tokens = []
+        amounts = []
+        proofs = []
+        for reward in rewards:
+            if reward.distribution_chain_id != ETHEREAL_CHAIN_ID:
+                raise ValueError(f"Unexpected reward chain: {reward.distribution_chain_id}")
+            if reward.recipient.lower() != self.address.lower():
+                raise ValueError(f"Unexpected reward recipient: {reward.recipient}")
+            if reward.claimable <= 0:
+                raise ValueError(f"No claimable {reward.token.symbol} reward")
+            if not reward.proofs:
+                raise ValueError(f"Missing {reward.token.symbol} reward proof")
+
+            proof = []
+            for value in reward.proofs:
+                raw = bytes.fromhex(value.removeprefix("0x"))
+                if len(raw) != 32:
+                    raise ValueError(f"Invalid {reward.token.symbol} reward proof")
+                proof.append(raw)
+
+            users.append(self.address)
+            tokens.append(reward.token.address)
+            amounts.append(reward.amount)
+            proofs.append(proof)
+
+        return make_call(
+            MERKL_DISTRIBUTOR,
+            "claim",
+            ["address[]", "address[]", "uint256[]", "bytes32[][]"],
+            [users, tokens, amounts, proofs],
+        )
+
+    async def claim_rewards(self, rewards: list[EtherealReward]) -> str:
+        call = self.reward_claim_call(rewards)
+        async with RPC(ETHEREAL_RPC_URL, "ethereal") as rpc:
+            await check_chain(rpc, ETHEREAL_CHAIN_ID)
+            tx_hash, fee = await send_contract(rpc, self.account, call)
+            url = f"{ETHEREAL_EXPLORER_URL}/tx/{tx_hash}"
+            logger.info(f"Reward claim submitted: fee {fee:,.8f}; {url}")
+            await wait_receipt(rpc, tx_hash, REWARD_RECEIPT_TIMEOUT_SEC)
+
+        logger.success(f"Rewards claimed: {url}")
+        return tx_hash
 
     async def _total_volume(self) -> Decimal:
         sub = await self.subaccount()

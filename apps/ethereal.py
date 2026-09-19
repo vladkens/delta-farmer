@@ -4,9 +4,11 @@ import asyncio
 from collections import defaultdict
 from decimal import Decimal
 
-from clients.ethereal import EtherealClient, EtherealPoint, EtherealPosition
-from lib.cli import create_cli, create_clients, noop_command, run_app
+from clients.ethereal import EtherealClient, EtherealPoint, EtherealPosition, EtherealReward
+from lib.cli import create_cli, create_clients, noop_command, print_deprecation_notice, run_app
+from lib.errors import AppError
 from lib.evm_cli import run_evm
+from lib.logger import logger
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -99,18 +101,84 @@ async def print_stats(accs: list[EtherealClient], period="week", filter_period="
     render_stats(periods_data, periods_to_show, points_fmt="{:,.0f}", pprice_fmt="{:,.4f}")
 
 
+async def load_rewards(
+    accs: list[EtherealClient], claimable_only: bool = False
+) -> list[tuple[EtherealClient, list[EtherealReward]]]:
+    rewards = await gather_accs(accs, lambda acc: acc.rewards(claimable_only))
+    return [(acc, items) for acc, items in zip(accs, rewards) if items]
+
+
+def reward_totals(
+    rows: list[tuple[EtherealClient, list[EtherealReward]]], field: str
+) -> dict[str, Decimal]:
+    totals: dict[str, Decimal] = defaultdict(Decimal)
+    for _acc, rewards in rows:
+        for reward in rewards:
+            totals[reward.token.symbol] += getattr(reward, field)
+
+    return totals
+
+
+def format_rewards(totals: dict[str, Decimal]) -> str:
+    return ", ".join(
+        f"{amount:,.6f}".rstrip("0").rstrip(".") + f" {symbol}"
+        for symbol, amount in sorted(totals.items())
+    )
+
+
+async def print_reward_notice(accs: list[EtherealClient]) -> None:
+    try:
+        rows = await load_rewards(accs, claimable_only=True)
+    except AppError as error:
+        logger.warning(f"Ethereal rewards unavailable: {error}")
+        return
+
+    totals = reward_totals(rows, "claimable")
+    if not totals:
+        return
+
+    accounts = ", ".join(acc.name for acc, _rewards in rows)
+    print(
+        f"* Claimable Ethereal rewards: {format_rewards(totals)} ({accounts}). "
+        "Run `uv run apps/ethereal.py claim`."
+    )
+
+
+async def claim_rewards(accs: list[EtherealClient]) -> None:
+    rows = await load_rewards(accs, claimable_only=True)
+    if not rows:
+        print("No claimable Ethereal rewards.")
+        return
+
+    for acc, rewards in rows:
+        acc.reward_claim_call(rewards)
+
+    totals = reward_totals(rows, "claimable")
+    for acc, rewards in rows:
+        await acc.claim_rewards(rewards)
+
+    print(f"Claimed Ethereal rewards: {format_rewards(totals)}.")
+
+
 # MARK: Main
 
 
 async def main():
-    cli = await create_cli("ethereal", "configs/ethereal.toml", ["privkey"])
+    cli = await create_cli(
+        "ethereal",
+        "configs/ethereal.toml",
+        ["privkey"],
+        custom_commands={"claim": lambda _: None},
+    )
     cfg = StrategyConfig.load(cli.config)
 
     all_accs, act_accs = await create_clients(cli, cfg.accounts, EtherealClient.from_config)
+    print_deprecation_notice("Ethereal closed; removed next release. https://app.ethereal.trade/")
 
     match cli.command:
         case "info":
             await print_info(all_accs)
+            await print_reward_notice(all_accs)
         case "stats":
             await print_stats(all_accs, period=cli.group, filter_period=cli.filter, force=cli.force)
         case "close":
@@ -119,6 +187,8 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
+        case "claim":
+            await claim_rewards(all_accs)
         case "move":
             await run_evm(cli, cfg.accounts)
         case "deposit" | "withdraw":
