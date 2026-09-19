@@ -14,7 +14,7 @@ from lib import utils
 from lib.decorators import bind_log_context, locked, retry, retry_on, ttl_cache
 from lib.evm import (
     ARBITRUM,
-    get_wallet_balances,
+    get_evm_balances,
     to_token_units,
 )
 from lib.http import ApiError, AsyncHttp, HttpMethod
@@ -47,7 +47,7 @@ from strategy.withdrawal import (
 API_URL = "https://omni.variational.io/api"
 APP_URL = "https://omni.variational.io"
 
-USDC = ARBITRUM.tokens["USDC"]
+USDC = ARBITRUM.stables["USDC"]
 OMNI_DEPOSIT_ASSET = DepositAsset("Omni", ARBITRUM, USDC)
 PERMIT_LIFETIME_SEC = 300
 PERMIT_CLOCK_SKEW_SEC = 60
@@ -232,10 +232,10 @@ class OmniClient:
             url if url.startswith(("http://", "https://")) else f"{API_URL}/{url.lstrip('/')}"
         )
         if "cType: 'managed'" in rep.text:
-            logger.debug(f"Cloudflare Managed Challenge {method} {url}; requesting cf_clearance")
+            logger.debug(f"Cloudflare Managed Challenge {method}; requesting cf_clearance: {url}")
             await solve_managed_cf_clearance(self.http, target_url, proxy=self.proxy)
         else:
-            logger.debug(f"Cloudflare JSD challenged {method} {url}; refreshing cf_clearance")
+            logger.debug(f"Cloudflare JSD challenged {method}; refreshing cf_clearance: {url}")
             if not await ensure_cf_clearance(self.http, target_url, force=True):
                 return rep
 
@@ -343,10 +343,18 @@ class OmniClient:
 
         balance, wallet_balances = await asyncio.gather(
             self.deposit_balance(),
-            get_wallet_balances(ARBITRUM, USDC, self.address, self.proxy),
+            get_evm_balances(
+                ARBITRUM,
+                self.address,
+                (USDC, ARBITRUM.native_token),
+                self.proxy,
+            ),
         )
-        wallet, native = wallet_balances
-        return DepositBalances(balance, wallet, native)
+        return DepositBalances(
+            balance,
+            wallet_balances[USDC],
+            wallet_balances[ARBITRUM.native_token],
+        )
 
     async def wallet_usdc_balance(self) -> Decimal:
         pld = {"ownerAddress": self.address}

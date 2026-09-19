@@ -9,14 +9,13 @@ from typing import NamedTuple, Protocol
 
 from pydantic import Field
 
-from lib.cli import confirm
 from lib.errors import AppError
 from lib.evm import EvmNetwork, EvmToken
 from lib.http import ApiError
 from lib.logger import logger
 from lib.models import DurationSec, TimeRange
 from lib.table import AutoTable, Column
-from lib.utils import format_duration
+from lib.utils import confirm, format_duration
 
 from .models import StrategyConfig
 
@@ -169,7 +168,7 @@ def _make_plan[T: DepositClient](
             balances.exchange,
             balances.wallet,
             Decimal(0),
-            DepositStatus(f"available deposit <${minimum:,.2f}", True),
+            DepositStatus("insufficient funds", True),
         )
 
     return DepositPlanItem(

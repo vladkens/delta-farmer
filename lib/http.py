@@ -75,6 +75,12 @@ class AsyncHttp:
             timeout=(10, 60),  # (connect, read)
         )
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        await self.close()
+
     def _load_cookies(self) -> None:
         # https://curl-cffi.readthedocs.io/en/latest/cookies.html
         if not self.cookies_file:

@@ -4,6 +4,7 @@ import random
 from decimal import Decimal
 from typing import Annotated
 
+from eth_utils import to_checksum_address
 from pydantic import (
     BaseModel,
     BeforeValidator,
@@ -99,7 +100,16 @@ class AccountConfig(BaseModel):
     name: str
     privkey: SecretStr = Field(repr=False)
     proxy: str | None = None
+    cex_addr: str | None = None
     enabled: bool = True
+
+    @field_validator("cex_addr", mode="before")
+    @classmethod
+    def validate_cex_addr(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+
+        return to_checksum_address(value)
 
     @field_validator("privkey", mode="before")
     @classmethod

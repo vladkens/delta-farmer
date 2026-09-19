@@ -21,7 +21,7 @@ from lib.evm import (
     EvmNetwork,
     EvmToken,
     execute_contract_with_erc20_allowance,
-    get_wallet_balances,
+    get_evm_balances,
     make_call,
     to_token_units,
 )
@@ -98,7 +98,7 @@ def _deposit_network(layer1: dict, assets: dict) -> DepositNetwork:
         [x for x in layer1["contract_addresses"] if x["name"] == "ZkLighterContract"]
     )
     asset = utils.first([x for x in assets["asset_details"] if x["symbol"] == "USDG"])
-    token = ROBINHOOD.tokens["USDG"]
+    token = ROBINHOOD.stables["USDG"]
     if (
         provider is None
         or contract is None
@@ -264,16 +264,15 @@ class LighterClient:
         res = await self._call("GET", "/api/v1/referral/userReferrals", params=pld, headers=hdr)
         return res.get("used_code") or None
 
-    async def _get_points(self) -> tuple[Decimal, int | None]:
-        pld = {"type": "all", "l1_address": self.address}
-        res = await self._call("GET", "/api/v1/leaderboard", params=pld)
-        address = self.address.lower()
-        item = utils.first([x for x in res["entries"] if x["l1_address"].lower() == address])
-        if item is None:
-            return Decimal(0), None
-
-        rank = int(item["entry"])
-        return Decimal(str(item["points"])), rank or None
+    async def _get_points(self, account_index: int) -> Decimal:
+        hdr = self._get_auth_headers(account_index)
+        res = await self._call(
+            "GET",
+            "/api/v1/livePoints/total",
+            params={"account_index": account_index},
+            headers=hdr,
+        )
+        return Decimal(str(res["total_live_points"]))
 
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
@@ -281,7 +280,7 @@ class LighterClient:
         volume = await self._get_volume(account_index)
         pnl = await self._get_pnl(account_index)
         ref_code = await self._get_used_referral_code(account_index)
-        points, rank = await self._get_points()
+        points = await self._get_points(account_index)
 
         return ProfileInfo(
             addr=utils.short_addr(self.address),
@@ -290,7 +289,6 @@ class LighterClient:
             pnl=pnl,
             points=points,
             ref_code=ref_code,
-            rank=rank,
         )
 
     async def use_referral_code(self, referral_code: str) -> None:
@@ -576,10 +574,18 @@ class LighterClient:
         info = await self.deposit_network()
         balance, wallet_balances = await asyncio.gather(
             self.deposit_balance(),
-            get_wallet_balances(info.network, info.token, self.address, self.proxy),
+            get_evm_balances(
+                info.network,
+                self.address,
+                (info.token, info.network.native_token),
+                self.proxy,
+            ),
         )
-        wallet, native = wallet_balances
-        return DepositBalances(balance, wallet, native)
+        return DepositBalances(
+            balance,
+            wallet_balances[info.token],
+            wallet_balances[info.network.native_token],
+        )
 
     async def deposit(self, amount: Decimal) -> str:
         info = await self.deposit_network()

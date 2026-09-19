@@ -5,12 +5,11 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 from typing import NamedTuple, Protocol
 
-from lib.cli import confirm
 from lib.errors import AppError
 from lib.evm import EvmNetwork, EvmToken
 from lib.logger import logger
 from lib.table import AutoTable, Column
-from lib.utils import format_duration
+from lib.utils import confirm, format_duration
 
 from .deposit import DepositConfig, balance_target
 

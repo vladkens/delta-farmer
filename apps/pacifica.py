@@ -105,7 +105,7 @@ async def print_stats(accs: list[PacificaClient], period="week", filter_period="
 
 
 async def main():
-    cli = await create_cli("pacifica", "configs/pacifica.toml", ["privkey"])
+    cli = await create_cli("pacifica", "configs/pacifica.toml", ["privkey"], evm=False)
     cfg = StrategyConfig.load(cli.config)
 
     all_accs, act_accs = await create_clients(cli, cfg.accounts, PacificaClient.from_config)

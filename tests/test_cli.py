@@ -4,9 +4,10 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from lib.cli import CliParser, _handle_login, confirm, create_cli, create_clients
+from lib.cli import CliParser, _handle_login, create_cli, create_clients
 from lib.errors import AppError
 from lib.models import AccountConfig
+from lib.utils import confirm
 
 
 class Client:
@@ -21,8 +22,8 @@ class Client:
 def test_confirm_sigint(monkeypatch):
     previous = Mock()
     set_signal = Mock(return_value=previous)
-    monkeypatch.setattr("lib.cli.signal.signal", set_signal)
-    monkeypatch.setattr("lib.cli.sys.stdin", Mock(isatty=Mock(return_value=False)))
+    monkeypatch.setattr("lib.utils.signal.signal", set_signal)
+    monkeypatch.setattr("lib.utils.sys.stdin", Mock(isatty=Mock(return_value=False)))
     monkeypatch.setattr("builtins.input", Mock(side_effect=KeyboardInterrupt))
 
     with pytest.raises(KeyboardInterrupt):

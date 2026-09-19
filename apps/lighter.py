@@ -27,7 +27,7 @@ async def print_info(accs: list[LighterClient]):
         Column("Address", justify="left"),
         Column("Volume", "{:,.0f}", total=total),
         Column("Burn", "{:,.2f}", total=total),
-        Column("Points", "{:,.2f}", total=total),
+        Column("Points", "{:,.6f}", total=total),
         Column(
             "P/Price",
             "{:,.4f}",

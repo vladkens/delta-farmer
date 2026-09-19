@@ -2,11 +2,14 @@
 # Copyright (c) vladkens | MIT License | Optimized for confusion
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import pickle
 import random
 import re
+import signal
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -18,6 +21,44 @@ from .errors import AppError
 from .logger import logger
 
 ACCOUNTS_CONCURRENCY = max(1, int(os.getenv("DF_ACCOUNTS_CONCURRENCY", "3")))
+
+
+def confirm(label: str) -> bool:
+    prompt = f"{label} [y/N]: "
+    previous_sigint = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        if not sys.stdin.isatty():
+            try:
+                return input(prompt).strip().lower() == "y"
+            except EOFError:
+                return False
+
+        try:
+            termios = cast(Any, importlib.import_module("termios"))
+            tty = cast(Any, importlib.import_module("tty"))
+        except ImportError:
+            try:
+                return input(prompt).strip().lower() == "y"
+            except EOFError:
+                return False
+
+        print(prompt, end="", flush=True)
+        fd = sys.stdin.fileno()
+        settings = termios.tcgetattr(fd)
+        choice = None
+        try:
+            tty.setcbreak(fd)
+            choice = sys.stdin.read(1).strip().lower()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, settings)
+            if choice is None:
+                print()
+            else:
+                print("y" if choice == "y" else "n")
+
+        return choice == "y"
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
 
 
 async def gather_accs[T, R](

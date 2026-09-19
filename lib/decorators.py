@@ -63,9 +63,9 @@ def retry[Func: Callable[..., Awaitable[Any]]](
 
 
 def retry_on[Func: Callable[..., Awaitable[Any]]](
-    exception: type[Exception], *, retries: int = 1
+    exception: type[Exception], *, retries: int = 1, delay: float = 0
 ) -> Callable[[Func], Func]:
-    """Retry an async function immediately for one specific exception."""
+    """Retry an async function for one specific exception."""
     retries = max(0, retries)
 
     def decorator(func: Func) -> Func:
@@ -81,6 +81,8 @@ def retry_on[Func: Callable[..., Awaitable[Any]]](
                         raise
                     message = str(e) or f"{func_name}: retrying after {exception.__name__}"
                     logger.debug(message)
+                    if delay:
+                        await asyncio.sleep(delay)
 
         return cast(Func, wrapper)
 

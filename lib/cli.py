@@ -4,16 +4,14 @@ import argparse
 import asyncio
 import getpass
 import glob
-import importlib
 import os
 import re
-import signal
 import subprocess
 import sys
 import time
 import tomllib
 from collections.abc import Callable, Coroutine, Sequence
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +19,7 @@ from . import support, telemetry
 from . import telegram as tg
 from .crypto import config_cli_parser
 from .errors import AppError
+from .evm_cli import run_evm, setup_evm_cli
 from .logger import enable_file_logging, logger
 from .models import AccountConfig
 from .proxy import print_proxies
@@ -50,38 +49,6 @@ LOGIN_PROXY_WARNING_ATTEMPTS = 3
 
 def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
-
-
-def confirm(label: str) -> bool:
-    prompt = f"{label} [y/N]: "
-    previous_sigint = signal.signal(signal.SIGINT, signal.default_int_handler)
-    try:
-        if not sys.stdin.isatty():
-            try:
-                return input(prompt).strip().lower() == "y"
-            except EOFError:
-                return False
-
-        try:
-            termios = cast(Any, importlib.import_module("termios"))
-            tty = cast(Any, importlib.import_module("tty"))
-        except ImportError:
-            try:
-                return input(prompt).strip().lower() == "y"
-            except EOFError:
-                return False
-
-        print(prompt, end="", flush=True)
-        fd = sys.stdin.fileno()
-        settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            return sys.stdin.read(1).strip().lower() == "y"
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, settings)
-            print()
-    finally:
-        signal.signal(signal.SIGINT, previous_sigint)
 
 
 def _env_enabled(name: str) -> bool:
@@ -268,6 +235,10 @@ async def create_clients[T: CliClient](
     status = await support.check([client.address for client in active_clients])
     await _show_banner(status)
 
+    if args.command == "evm":
+        await run_evm(args, accounts)
+        return all_clients, active_clients
+
     if args.command == "login":
         await _handle_login(all_clients, force=args.force)
         sys.exit(0)
@@ -330,6 +301,8 @@ async def create_cli(
     config_path: str,
     sec_fields: list[str],
     custom_commands: dict[str, Callable[[argparse.ArgumentParser], None]] | None = None,
+    *,
+    evm: bool = True,
 ) -> argparse.Namespace:
     cli = CliParser(prog=name, formatter_class=HelpFormatter)
 
@@ -348,6 +321,8 @@ async def create_cli(
     sub.add_parser("proxy", help="Check configured proxies")
     sub.add_parser("clean", help="Delete cached data")
     sub.add_parser("tgtest", help=argparse.SUPPRESS)
+    if evm:
+        setup_evm_cli(sub.add_parser("evm", help="Show balances and move EVM assets"))
     for command, setup in (custom_commands or {}).items():
         parser = sub.add_parser(command, help=f"Run {command} tools")
         setup(parser)

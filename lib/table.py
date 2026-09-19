@@ -63,6 +63,7 @@ class AutoTable:
         self._gtitle = gtitle
         self._sub_title = None
         self._groups = []
+        self._footer = None
 
         self.box = box
         self.title = title
@@ -73,6 +74,9 @@ class AutoTable:
             row.append(None if col.compute else next(value_iter))
 
         self.rows.append(row)
+
+    def set_footer(self, *values):
+        self._footer = list(values)
 
     def _flush_group(self):
         if self._sub_title is not None:
@@ -131,7 +135,7 @@ class AutoTable:
                 return "err"
 
         tbl = Table(title=self.title, box=self.box, show_footer=True)
-        totals = self._compute_totals_for_rows(self.rows)
+        totals = self._footer or self._compute_totals_for_rows(self.rows)
 
         if self._groups:
             tbl.add_column(self._gtitle, justify="left")
