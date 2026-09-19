@@ -13,10 +13,17 @@ trade_size_usd = { min = 140, max = 160 }       # Total size in USD at the lever
 trade_duration  = { min = "15m", max = "20m" }  # How long to hold positions
 trade_cooldown  = { min = "3m",  max = "6m"  }  # Pause between trades
 
+# Exchange balance management (Omni and Lighter)
+# balance_target = 310
+# balance_target_jitter_pct = 2  # Random target within ±2%; set to 0 to disable
+# deposit_min_amount = 10
+# balance_transfer_delay = { min = "2m", max = "4m" }
+
 [[accounts]]
 name = "acc1"
 privkey = "your-private-key-here"  # Run `config encrypt` after filling in keys!
 # proxy = "http://user:pass@host:port"
+# cex_addr = "0x0000000000000000000000000000000000000000"
 
 [[accounts]]
 name = "acc2"

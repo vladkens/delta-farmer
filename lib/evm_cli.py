@@ -219,8 +219,9 @@ def _plan_table(plan: list[EvmAction]) -> AutoTable:
 
 
 async def _execute_plan(plan: list[EvmAction]) -> None:
-    for operation, state, source, target, quantity in plan:
-        with logger.contextualize(account=state.config.name):
+    for index, (operation, state, source, target, quantity) in enumerate(plan):
+        progress = f"{index + 1}/{len(plan)}"
+        with logger.contextualize(account=state.config.name, progress=progress):
             if operation == "move":
                 await relay_move(
                     state.account,

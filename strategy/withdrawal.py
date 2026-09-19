@@ -142,11 +142,11 @@ def _make_plan[T: WithdrawalClient](
 
 
 def _target_label(cfg: DepositConfig) -> str:
-    assert cfg.deposit_target is not None
-    spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
+    assert cfg.balance_target is not None
+    spread = cfg.balance_target * cfg.balance_target_jitter_pct / 100
     if not spread:
-        return f"${cfg.deposit_target:,.2f}"
-    return f"${cfg.deposit_target - spread:,.2f}–${cfg.deposit_target + spread:,.2f}"
+        return f"${cfg.balance_target:,.2f}"
+    return f"${cfg.balance_target - spread:,.2f}–${cfg.balance_target + spread:,.2f}"
 
 
 async def run_withdrawals[T: WithdrawalClient](
@@ -155,8 +155,8 @@ async def run_withdrawals[T: WithdrawalClient](
     *,
     withdraw_full: bool = False,
 ) -> None:
-    if not withdraw_full and cfg.deposit_target is None:
-        raise AppError("Set deposit_target in config")
+    if not withdraw_full and cfg.balance_target is None:
+        raise AppError("Set balance_target in config")
     if not accounts:
         logger.info("No accounts configured for withdrawal")
         return
@@ -171,9 +171,9 @@ async def run_withdrawals[T: WithdrawalClient](
 
     assert asset is not None
     network = asset.network.name.title()
-    delay = format_duration(cfg.deposit_delay.min)
-    if cfg.deposit_delay.min != cfg.deposit_delay.max:
-        delay += f"–{format_duration(cfg.deposit_delay.max)}"
+    delay = format_duration(cfg.balance_transfer_delay.min)
+    if cfg.balance_transfer_delay.min != cfg.balance_transfer_delay.max:
+        delay += f"–{format_duration(cfg.balance_transfer_delay.max)}"
 
     print(f"Network: {network} ({asset.network.chain_id}), token: {asset.token.symbol}")
     if withdraw_full:
@@ -237,8 +237,11 @@ async def run_withdrawals[T: WithdrawalClient](
     await asyncio.sleep(WITHDRAWAL_START_DELAY_SEC)
     print("-" * 60)
     for index, row in enumerate(plan):
-        await row.account.withdraw(row.amount)
+        progress = f"{index + 1}/{len(plan)}"
+        with logger.contextualize(progress=progress):
+            await row.account.withdraw(row.amount)
+
         if index < len(plan) - 1:
-            wait = cfg.deposit_delay.sample()
+            wait = cfg.balance_transfer_delay.sample()
             logger.info(f"Waiting {format_duration(wait)} before next withdrawal")
             await asyncio.sleep(wait)

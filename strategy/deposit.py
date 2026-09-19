@@ -4,7 +4,7 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import NamedTuple, Protocol
 
 from pydantic import Field
@@ -22,6 +22,7 @@ from .models import StrategyConfig
 DEPOSIT_CREDIT_TIMEOUT_SEC = 30 * 60
 DEPOSIT_POLL_DELAY = 10
 DEPOSIT_START_DELAY_SEC = 1.5
+BALANCE_TARGET_STEP = Decimal("0.05")
 
 
 class DepositClient(Protocol):
@@ -38,13 +39,10 @@ class DepositClient(Protocol):
 
 
 class DepositConfig(StrategyConfig):
-    deposit_target: Decimal | None = Field(None, gt=0)
-    deposit_target_random_pct: Decimal = Field(Decimal(0), ge=0, lt=100)
+    balance_target: Decimal | None = Field(None, gt=0)
+    balance_target_jitter_pct: Decimal = Field(Decimal(2), ge=0, lt=100)
     deposit_min_amount: Decimal = Field(Decimal(10), ge=0)
-    deposit_delay: TimeRange = TimeRange(
-        min=DurationSec("30s"),
-        max=DurationSec("90s"),
-    )
+    balance_transfer_delay: TimeRange = TimeRange(min=DurationSec("2m"), max=DurationSec("4m"))
 
 
 @dataclass(frozen=True)
@@ -108,13 +106,25 @@ async def wait_for_deposit_credit(
 
 
 def balance_target(cfg: DepositConfig) -> Decimal:
-    assert cfg.deposit_target is not None
-    spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
+    assert cfg.balance_target is not None
+    spread = cfg.balance_target * cfg.balance_target_jitter_pct / 100
     if not spread:
-        return cfg.deposit_target
+        return cfg.balance_target
 
-    offset = Decimal(str(random.random())) * spread * 2
-    return (cfg.deposit_target - spread + offset).quantize(Decimal("0.01"))
+    min_units = int(
+        ((cfg.balance_target - spread) / BALANCE_TARGET_STEP).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+    )
+    max_units = int(
+        ((cfg.balance_target + spread) / BALANCE_TARGET_STEP).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+    )
+    if min_units > max_units:
+        return cfg.balance_target
+
+    return Decimal(random.randint(min_units, max_units)) * BALANCE_TARGET_STEP
 
 
 def _make_plan[T: DepositClient](
@@ -125,9 +135,9 @@ def _make_plan[T: DepositClient](
     minimum: Decimal,
 ) -> DepositPlanItem[T]:
     random_target = balance_target(cfg)
-    assert cfg.deposit_target is not None
-    spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
-    maximum_target = cfg.deposit_target + spread
+    assert cfg.balance_target is not None
+    spread = cfg.balance_target * cfg.balance_target_jitter_pct / 100
+    maximum_target = cfg.balance_target + spread
     if balances.unavailable:
         return DepositPlanItem(
             account,
@@ -182,15 +192,15 @@ def _make_plan[T: DepositClient](
 
 
 def _plan_header(cfg: DepositConfig, asset: DepositAsset, minimum: Decimal) -> str:
-    assert cfg.deposit_target is not None
-    spread = cfg.deposit_target * cfg.deposit_target_random_pct / 100
-    target = f"${cfg.deposit_target:,.2f}"
+    assert cfg.balance_target is not None
+    spread = cfg.balance_target * cfg.balance_target_jitter_pct / 100
+    target = f"${cfg.balance_target:,.2f}"
     if spread:
-        target = f"${cfg.deposit_target - spread:,.2f}–${cfg.deposit_target + spread:,.2f}"
+        target = f"${cfg.balance_target - spread:,.2f}–${cfg.balance_target + spread:,.2f}"
 
-    delay = format_duration(cfg.deposit_delay.min)
-    if cfg.deposit_delay.min != cfg.deposit_delay.max:
-        delay += f"–{format_duration(cfg.deposit_delay.max)}"
+    delay = format_duration(cfg.balance_transfer_delay.min)
+    if cfg.balance_transfer_delay.min != cfg.balance_transfer_delay.max:
+        delay += f"–{format_duration(cfg.balance_transfer_delay.max)}"
 
     network = asset.network.name.title()
     return (
@@ -214,8 +224,8 @@ async def run_deposits[T: DepositClient](
     accounts: list[T],
     cfg: DepositConfig,
 ) -> None:
-    if cfg.deposit_target is None:
-        raise AppError("Set deposit_target in config")
+    if cfg.balance_target is None:
+        raise AppError("Set balance_target in config")
     if not accounts:
         logger.info("No accounts configured for deposit")
         return
@@ -255,8 +265,11 @@ async def run_deposits[T: DepositClient](
     await asyncio.sleep(DEPOSIT_START_DELAY_SEC)
     print("-" * 60)
     for index, row in enumerate(plan):
-        await row.account.deposit(row.amount)
+        progress = f"{index + 1}/{len(plan)}"
+        with logger.contextualize(progress=progress):
+            await row.account.deposit(row.amount)
+
         if index < len(plan) - 1:
-            wait = cfg.deposit_delay.sample()
+            wait = cfg.balance_transfer_delay.sample()
             logger.info(f"Waiting {format_duration(wait)} before next deposit")
             await asyncio.sleep(wait)

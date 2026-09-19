@@ -35,15 +35,20 @@ def formatter(record):
         color = _grp_color(grp)
         pre.append(f"<{color}>{grp}</{color}>")
 
+    progress = record["extra"].get("progress")
     if acc := record["extra"].get("account"):
+        if progress:
+            acc = f"{acc} [{progress}]"
         pre.append(f"<cyan>{acc}</cyan>")
+    elif progress:
+        pre.append(f"<cyan>[{progress}]</cyan>")
 
     pre = "/".join(pre)
     pre = f"{pre} › " if pre else ""
     message = f"{pre}{message}"
 
     extra = sorted(record["extra"].items(), key=lambda x: x[0])
-    extra = [(k, v) for k, v in extra if k not in ("account", "group")]
+    extra = [(k, v) for k, v in extra if k not in ("account", "group", "progress")]
     extra = [f"<cyan>{k}</cyan>=<yellow>{v}</yellow>" for k, v in extra]
     extra = " ".join(extra)
     extra = f" {extra}" if extra else ""

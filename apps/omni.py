@@ -17,7 +17,7 @@ from lib.evm_cli import run_evm
 from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
-from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
+from lib.utils import confirm, gather_accs, parse_filter, short_addr, to_period_day
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups
@@ -147,8 +147,7 @@ async def print_stats(accs: list[OmniClient], period="week", filter_period="all"
 
 
 def setup_competition_cli(parser: argparse.ArgumentParser) -> None:
-    commands = parser.add_subparsers(dest="competition_action")
-    commands.add_parser("join", help="Join competition with all accounts")
+    parser.add_argument("--join", action="store_true", help=argparse.SUPPRESS)
 
 
 def _select_account(
@@ -241,10 +240,6 @@ def _competition_status_table(rows: list[CompetitionRow]) -> None:
 
     tbl.print()
 
-    needs_join = any(status and status.ongoing and status.user is None for _a, status, _e in rows)
-    if needs_join:
-        print("* Some accounts have not joined. Run `uv run apps/omni.py competition join`.")
-
 
 async def print_competition_hint(accs: list[OmniClient]) -> None:
     if not accs:
@@ -256,31 +251,45 @@ async def print_competition_hint(accs: list[OmniClient]) -> None:
         return
 
     if status.ongoing:
-        print("Omni competition is active. Join: `uv run apps/omni.py competition join`.")
+        print("Omni competition is active. Run `uv run apps/omni.py competition` to check or join.")
 
 
-async def print_competition_status(accs: list[OmniClient]) -> None:
+async def _load_competition_rows(accs: list[OmniClient]) -> list[CompetitionRow]:
     async def row(acc: OmniClient):
         try:
             return acc, await acc.competition_status(), None
         except ApiError as e:
             return acc, None, str(e)
 
-    _competition_status_table(await gather_accs(accs, row))
+    return await gather_accs(accs, row)
 
 
-async def join_competition(accs: list[OmniClient]) -> None:
-    async def row(acc: OmniClient):
+async def run_competition(accs: list[OmniClient], *, auto_join: bool = False) -> None:
+    rows = await _load_competition_rows(accs)
+    _competition_status_table(rows)
+
+    pending = [row for row in rows if row[1] is not None and row[1].ongoing and row[1].user is None]
+    if not pending:
+        return
+
+    count = len(pending)
+    account_label = "account" if count == 1 else "accounts"
+    if not auto_join and not confirm(f"Join competition with {count} {account_label}?"):
+        return
+
+    async def join(row: CompetitionRow) -> CompetitionRow:
+        acc, _status, _error = row
         try:
+            await acc.competition_opt_in()
             status = await acc.competition_status()
-            if status.ongoing and status.user is None:
-                await acc.competition_opt_in()
-                status = await acc.competition_status()
             return acc, status, None
         except ApiError as e:
             return acc, None, str(e)
 
-    _competition_status_table(await gather_accs(accs, row))
+    updates = {row[0].name: row for row in await gather_accs(pending, join)}
+    rows = [updates.get(row[0].name, row) for row in rows]
+    print()
+    _competition_status_table(rows)
 
 
 # MARK: Main
@@ -316,10 +325,7 @@ async def main():
         case "move":
             await run_evm(cli, cfg.accounts)
         case "competition":
-            if cli.competition_action == "join":
-                await join_competition(all_accs)
-            else:
-                await print_competition_status(all_accs)
+            await run_competition(all_accs, auto_join=cli.join)
         case "deposit":
             accounts = _select_account(all_accs, act_accs, cli.account)
             await run_deposits(accounts, cfg)

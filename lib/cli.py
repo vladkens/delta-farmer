@@ -82,7 +82,7 @@ def _telemetry_props(args: argparse.Namespace) -> dict[str, Any]:
         }
     if args.command == "competition":
         return {
-            "competition_join": getattr(args, "competition_action", None) == "join",
+            "competition_join": getattr(args, "join", False),
         }
     return {}
 
