@@ -1,5 +1,6 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
+import argparse
 import asyncio
 from decimal import Decimal
 
@@ -11,6 +12,7 @@ from lib.utils import gather_accs, short_addr
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups
+from strategy.withdrawal import run_withdrawals
 
 
 class LighterConfig(DepositConfig):
@@ -72,12 +74,37 @@ async def require_login(accs: list[LighterClient]) -> None:
         raise AppError(f"Login required: {names}. Run: uv run apps/lighter.py login")
 
 
+def setup_withdraw_cli(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-a", "--account", metavar="NAME", help="Run for one enabled account")
+    parser.add_argument("--full", action="store_true", help="Withdraw the full balance")
+
+
+def _select_account(
+    all_accs: list[LighterClient],
+    act_accs: list[LighterClient],
+    name: str | None,
+) -> list[LighterClient]:
+    if name is None:
+        return act_accs
+
+    account = next((acc for acc in all_accs if acc.name == name), None)
+    if account is None:
+        raise AppError(f"Account not found: {name}")
+    if account not in act_accs:
+        raise AppError(f"Account is disabled: {name}")
+
+    return [account]
+
+
 async def main():
     cli = await create_cli(
         "lighter",
         "configs/lighter.toml",
         ["privkey"],
-        custom_commands={"deposit": lambda _: None},
+        custom_commands={
+            "deposit": lambda _: None,
+            "withdraw": setup_withdraw_cli,
+        },
     )
     cfg = load_config(LighterConfig, cli.config)
     all_accs, act_accs = await create_clients(cli, cfg.accounts, LighterClient.from_config)
@@ -96,6 +123,10 @@ async def main():
                 await print_positions(act_accs)
             case "deposit":
                 await run_deposits(act_accs, cfg)
+            case "withdraw":
+                accounts = _select_account(all_accs, act_accs, cli.account)
+                await require_login(accounts)
+                await run_withdrawals(accounts, cfg, withdraw_full=cli.full)
     finally:
         await asyncio.gather(*(acc.close() for acc in all_accs))
 

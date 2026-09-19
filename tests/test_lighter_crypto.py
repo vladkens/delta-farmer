@@ -1,6 +1,8 @@
 import base64
 
 import pytest
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from lib.lighter_crypto import LighterSigner
 from lib.lighter_crypto.field import (
@@ -177,6 +179,52 @@ def test_integrator_vector(monkeypatch):
         "chainId: 0x0000000000000130\n"
         "Only sign this message for a trusted client!"
     )
+
+
+def test_robinhood_fast_withdraw_vector(monkeypatch):
+    monkeypatch.setattr("lib.lighter_crypto.signer.secrets.randbelow", lambda _: 1)
+    signer = LighterSigner(SEED, 466324)
+    address = "0x731a64a386a01B898963Ced8141c699B93b0bDE5"
+    memo = bytes.fromhex(address[2:]) + bytes(12)
+    signature = (
+        "0x510bbddb4fb3fe71cdf2dfde22339a9c0c75cfe1d5c9b947f50b0df7c0d34ac3"
+        "24aa7f912fed27c4a83d45dcb8ced02817cb35142aa44276b8f55e56eb3aaf941b"
+    )
+    message = signer.transfer_message(
+        account_index=28799,
+        api_key_index=0,
+        to_account_index=5,
+        asset_index=3,
+        from_route_type=0,
+        to_route_type=0,
+        amount=20_000_000,
+        usdc_fee=0,
+        memo=memo,
+        nonce=1789728338987,
+    )
+    tx = signer.sign_transfer(
+        account_index=28799,
+        api_key_index=0,
+        to_account_index=5,
+        asset_index=3,
+        from_route_type=0,
+        to_route_type=0,
+        amount=20_000_000,
+        usdc_fee=0,
+        memo=memo,
+        nonce=1789728338987,
+        expired_at=1789728948526,
+        l1_signature=signature,
+    )
+
+    recovered = Account.recover_message(encode_defunct(text=message), signature=signature)
+    assert recovered == address
+    assert tx.tx_type == 12
+    assert tx.tx_hash == (
+        "a697abd57e04ad2e26e9c6d15025788f618b110b7ef5bb56048c83c2f9bccd8e92741dfbc9b845d8"
+    )
+    assert tx.info["Memo"] == list(memo)
+    assert tx.info["L1Sig"] == signature
 
 
 def test_order_vectors(monkeypatch):

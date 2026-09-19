@@ -21,11 +21,14 @@ from .field import (
 )
 from .poseidon import bytes_to_fields, poseidon_hash_fp5
 
+# Adapted from https://github.com/elliottech/lighter-go
+
 SCALAR_ORDER = 1067993516717146951041484916571792702745057740581727230159139685185762082554198619328292418486241
 SCALAR_BITS = SCALAR_ORDER.bit_length()
 LIGHTER_CHAIN_ID = 304
 ROBINHOOD_SIGNING_CHAIN_ID = 466324
 CHANGE_PUB_KEY_TX_TYPE = 8
+TRANSFER_TX_TYPE = 12
 CREATE_ORDER_TX_TYPE = 14
 CANCEL_ORDER_TX_TYPE = 15
 CANCEL_ALL_ORDERS_TX_TYPE = 16
@@ -35,12 +38,14 @@ SKIP_NONCE_ATTRIBUTE = 4
 
 MAX_ACCOUNT_INDEX = (1 << 48) - 2
 MAX_API_KEY_INDEX = (1 << 8) - 2
+MAX_ASSET_INDEX = (1 << 6) - 2
 MAX_MARKET_INDEX = (1 << 15) - 1
 MAX_ORDER_INDEX = (1 << 60) - 1
 MAX_ORDER_VALUE = (1 << 48) - 1
 MAX_ORDER_PRICE = (1 << 32) - 1
 MAX_TIMESTAMP = (1 << 48) - 1
 MAX_FEE = 1_000_000
+MAX_TRANSFER_AMOUNT = (1 << 63) - 1
 
 CURVE_B = make_fp5((0, 263, 0, 0, 0))
 CURVE_B2 = make_fp5((0, 526, 0, 0, 0))
@@ -357,6 +362,125 @@ class LighterSigner:
         )
         tx_info = {**tx.info, "L1Sig": f"0x{l1_signature}"}
         return SignedTx(tx_type=tx.tx_type, tx_hash=tx.tx_hash, info=tx_info)
+
+    def transfer_message(
+        self,
+        account_index: int,
+        api_key_index: int,
+        to_account_index: int,
+        asset_index: int,
+        from_route_type: int,
+        to_route_type: int,
+        amount: int,
+        usdc_fee: int,
+        memo: bytes,
+        nonce: int,
+    ) -> str:
+        self._validate_indices(account_index, api_key_index, nonce)
+        _check_range("to_account_index", to_account_index, -1, MAX_ACCOUNT_INDEX)
+        _check_range("asset_index", asset_index, 1, MAX_ASSET_INDEX)
+        _check_range("from_route_type", from_route_type, 0, 1)
+        _check_range("to_route_type", to_route_type, 0, 1)
+        _check_range("amount", amount, 1, MAX_TRANSFER_AMOUNT)
+        _check_range("usdc_fee", usdc_fee, 0, MAX_TRANSFER_AMOUNT)
+        if len(memo) != 32:
+            raise ValueError(f"Transfer memo must be 32 bytes, got {len(memo)}")
+
+        return (
+            "Transfer\n\n"
+            f"nonce: 0x{nonce:016x}\n"
+            f"from: 0x{account_index:016x} (route 0x{from_route_type:016x})\n"
+            f"api key: 0x{api_key_index:016x}\n"
+            f"to: 0x{to_account_index:016x} (route 0x{to_route_type:016x})\n"
+            f"asset: 0x{asset_index:016x}\n"
+            f"amount: 0x{amount:016x}\n"
+            f"fee: 0x{usdc_fee:016x}\n"
+            f"chainId: 0x{self.chain_id:016x}\n"
+            f"memo: {memo.hex()}\n"
+            "Only sign this message for a trusted client!"
+        )
+
+    def sign_transfer(
+        self,
+        account_index: int,
+        api_key_index: int,
+        to_account_index: int,
+        asset_index: int,
+        from_route_type: int,
+        to_route_type: int,
+        amount: int,
+        usdc_fee: int,
+        memo: bytes,
+        nonce: int,
+        expired_at: int,
+        l1_signature: str,
+    ) -> SignedTx:
+        self.transfer_message(
+            account_index,
+            api_key_index,
+            to_account_index,
+            asset_index,
+            from_route_type,
+            to_route_type,
+            amount,
+            usdc_fee,
+            memo,
+            nonce,
+        )
+        _check_range("expired_at", expired_at, 0, MAX_TIMESTAMP)
+
+        l1_signature = l1_signature.removeprefix("0x")
+        try:
+            l1_signature_bytes = bytes.fromhex(l1_signature)
+        except ValueError:
+            raise ValueError("L1 signature must be hexadecimal") from None
+
+        if len(l1_signature_bytes) != 65:
+            raise ValueError(f"L1 signature must be 65 bytes, got {len(l1_signature_bytes)}")
+
+        fields = (
+            self.chain_id,
+            TRANSFER_TX_TYPE,
+            nonce,
+            expired_at,
+            account_index,
+            api_key_index,
+            to_account_index,
+            asset_index,
+            from_route_type,
+            to_route_type,
+            amount & 0xFFFFFFFF,
+            amount >> 32,
+            usdc_fee & 0xFFFFFFFF,
+            usdc_fee >> 32,
+        )
+        tx_hash = poseidon_hash_fp5(fields)
+        attributes_hash = _attributes_hash(True)
+        assert attributes_hash is not None
+        tx_hash = poseidon_hash_fp5((*tx_hash, *attributes_hash))
+        tx_hash_bytes = fp5_to_bytes(tx_hash)
+        signature = self._sign_hash(tx_hash_bytes)
+        info: dict[str, object] = {
+            "FromAccountIndex": account_index,
+            "ApiKeyIndex": api_key_index,
+            "ToAccountIndex": to_account_index,
+            "AssetIndex": asset_index,
+            "FromRouteType": from_route_type,
+            "ToRouteType": to_route_type,
+            "Amount": amount,
+            "USDCFee": usdc_fee,
+            "Memo": list(memo),
+            "ExpiredAt": expired_at,
+            "Nonce": nonce,
+            "Sig": base64.b64encode(signature).decode(),
+            "L1Sig": f"0x{l1_signature}",
+            "L2TxAttributes": {str(SKIP_NONCE_ATTRIBUTE): 1},
+        }
+        return SignedTx(
+            tx_type=TRANSFER_TX_TYPE,
+            tx_hash=tx_hash_bytes.hex(),
+            info=info,
+        )
 
     def sign_create_order(
         self,
