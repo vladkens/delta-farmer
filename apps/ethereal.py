@@ -5,7 +5,8 @@ from collections import defaultdict
 from decimal import Decimal
 
 from clients.ethereal import EtherealClient, EtherealPoint, EtherealPosition
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, create_clients, noop_command, run_app
+from lib.evm_cli import run_evm
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -118,6 +119,10 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
+        case "move":
+            await run_evm(cli, cfg.accounts)
+        case "deposit" | "withdraw":
+            noop_command("Ethereal", cli.command)
 
 
 if __name__ == "__main__":

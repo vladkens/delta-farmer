@@ -13,6 +13,7 @@ from pydantic import Field, SecretStr
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
 from lib.cli import create_cli, create_clients, run_app
 from lib.errors import AppError
+from lib.evm_cli import run_evm
 from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -148,15 +149,6 @@ async def print_stats(accs: list[OmniClient], period="week", filter_period="all"
 def setup_competition_cli(parser: argparse.ArgumentParser) -> None:
     commands = parser.add_subparsers(dest="competition_action")
     commands.add_parser("join", help="Join competition with all accounts")
-
-
-def setup_account_cli(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("-a", "--account", metavar="NAME", help="Run for one enabled account")
-
-
-def setup_withdraw_cli(parser: argparse.ArgumentParser) -> None:
-    setup_account_cli(parser)
-    parser.add_argument("--full", action="store_true", help="Withdraw the full balance")
 
 
 def _select_account(
@@ -301,8 +293,6 @@ async def main():
         ["privkey", "captcha_key"],
         custom_commands={
             "competition": setup_competition_cli,
-            "deposit": setup_account_cli,
-            "withdraw": setup_withdraw_cli,
         },
     )
     cfg = OmniConfig.load(cli.config)
@@ -323,16 +313,18 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
+        case "move":
+            await run_evm(cli, cfg.accounts)
         case "competition":
             if cli.competition_action == "join":
                 await join_competition(all_accs)
             else:
                 await print_competition_status(all_accs)
         case "deposit":
-            accounts = _select_account(all_accs, act_accs, getattr(cli, "account", None))
+            accounts = _select_account(all_accs, act_accs, cli.account)
             await run_deposits(accounts, cfg)
         case "withdraw":
-            accounts = _select_account(all_accs, act_accs, getattr(cli, "account", None))
+            accounts = _select_account(all_accs, act_accs, cli.account)
             await run_withdrawals(
                 accounts,
                 cfg,

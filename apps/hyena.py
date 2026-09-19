@@ -10,7 +10,8 @@ from rich.console import Console
 
 from clients.hyena import HyenaClient
 from clients.hyperliquid import migrate_hyperliquid_accounts, warn_legacy_hyperliquid_accounts
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, create_clients, noop_command, run_app
+from lib.evm_cli import run_evm
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
@@ -216,6 +217,10 @@ async def main():
             await migrate_hyperliquid_accounts(all_accs, "Hyena")
         case "trade":
             await run_groups(cfg, act_accs)
+        case "move":
+            await run_evm(cli, cfg.accounts)
+        case "deposit" | "withdraw":
+            noop_command("Hyena", cli.command)
 
 
 if __name__ == "__main__":

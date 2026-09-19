@@ -19,7 +19,7 @@ from . import support, telemetry
 from . import telegram as tg
 from .crypto import config_cli_parser
 from .errors import AppError
-from .evm_cli import run_evm, setup_evm_cli
+from .evm_cli import setup_evm_cli
 from .logger import enable_file_logging, logger
 from .models import AccountConfig
 from .proxy import print_proxies
@@ -49,6 +49,13 @@ LOGIN_PROXY_WARNING_ATTEMPTS = 3
 
 def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
+
+
+def noop_command(exchange: str, command: str) -> None:
+    raise AppError(
+        f"{command.capitalize()} is not implemented for {exchange}. "
+        "If you need it, request it in the chat: https://t.me/eazyrekt"
+    )
 
 
 def _env_enabled(name: str) -> bool:
@@ -122,14 +129,6 @@ def cli_anyarg(
     _apply(parser, is_root=True)
 
 
-def _git_hash(repo: str) -> str | None:
-    try:
-        cmd = ["git", "rev-parse", "--short", "HEAD"]
-        return subprocess.check_output(cmd, cwd=repo, stderr=subprocess.DEVNULL).decode().strip()
-    except Exception:
-        return None
-
-
 def _git_tag(repo: str) -> bool:
     # returns non-zero (CalledProcessError) if HEAD is not exactly on a tag
     try:
@@ -155,8 +154,7 @@ def _get_version() -> tuple[str, bool]:
         repo = os.path.join(os.path.dirname(__file__), "..")
         if _git_tag(repo):
             return f"v{version} ", True
-        short = _git_hash(repo)
-        return (f"v{version}-{short} ", False) if short else (f"v{version} ", True)
+        return f"v{version}-dev ", False
     except Exception:
         return "", True
 
@@ -235,15 +233,11 @@ async def create_clients[T: CliClient](
     status = await support.check([client.address for client in active_clients])
     await _show_banner(status)
 
-    if args.command == "evm":
-        await run_evm(args, accounts)
-        return all_clients, active_clients
-
     if args.command == "login":
         await _handle_login(all_clients, force=args.force)
         sys.exit(0)
 
-    if args.command == "addresses":
+    if args.command == "addrs":
         _print_addresses(all_clients)
         sys.exit(0)
 
@@ -301,8 +295,6 @@ async def create_cli(
     config_path: str,
     sec_fields: list[str],
     custom_commands: dict[str, Callable[[argparse.ArgumentParser], None]] | None = None,
-    *,
-    evm: bool = True,
 ) -> argparse.Namespace:
     cli = CliParser(prog=name, formatter_class=HelpFormatter)
 
@@ -311,7 +303,7 @@ async def create_cli(
     sub.add_parser("close", help="Close all positions")
     sub.add_parser("positions", help="Show active positions")
     sub.add_parser("info", help="Show accounts info")
-    sub.add_parser("addresses", help="Show configured wallet addresses")
+    sub.add_parser("addrs", help="Show configured wallet addresses")
     login_parser = sub.add_parser("login", help="Check and restore account logins")
     login_parser.add_argument("--force", action="store_true", help="Start with a fresh login")
     license_parser = sub.add_parser("license", help="Manage Supporter subscription")
@@ -321,8 +313,12 @@ async def create_cli(
     sub.add_parser("proxy", help="Check configured proxies")
     sub.add_parser("clean", help="Delete cached data")
     sub.add_parser("tgtest", help=argparse.SUPPRESS)
-    if evm:
-        setup_evm_cli(sub.add_parser("evm", help="Show balances and move EVM assets"))
+    setup_evm_cli(sub.add_parser("move", help="Show movable balances or move assets"))
+    deposit_parser = sub.add_parser("deposit", help="Deposit funds")
+    deposit_parser.add_argument("-a", "--account", metavar="NAME", help="Use one enabled account")
+    withdraw_parser = sub.add_parser("withdraw", help="Withdraw funds")
+    withdraw_parser.add_argument("-a", "--account", metavar="NAME", help="Use one enabled account")
+    withdraw_parser.add_argument("--full", action="store_true", help="Withdraw the full balance")
     for command, setup in (custom_commands or {}).items():
         parser = sub.add_parser(command, help=f"Run {command} tools")
         setup(parser)

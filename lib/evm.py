@@ -66,7 +66,7 @@ ROBINHOOD = EvmNetwork(
 ETHEREUM = EvmNetwork(
     name="ethereum",
     chain_id=1,
-    rpc_url="https://ethereum.publicnode.com",
+    rpc_url="https://eth.drpc.org",
     explorer_url="https://etherscan.io",
     short_name="ETH",
     stables={
@@ -77,7 +77,7 @@ ETHEREUM = EvmNetwork(
 OPTIMISM = EvmNetwork(
     name="optimism",
     chain_id=10,
-    rpc_url="https://optimism.publicnode.com",
+    rpc_url="https://mainnet.optimism.io",
     explorer_url="https://optimistic.etherscan.io",
     short_name="OP",
     stables={
@@ -88,7 +88,7 @@ OPTIMISM = EvmNetwork(
 BSC = EvmNetwork(
     name="bsc",
     chain_id=56,
-    rpc_url="https://bsc-rpc.publicnode.com",
+    rpc_url="https://bsc-dataseed.bnbchain.org",
     explorer_url="https://bscscan.com",
     native_token=EvmToken("BNB", ZERO_ADDRESS, 18),
     short_name="BSC",
@@ -128,6 +128,7 @@ HYPEREVM = EvmNetwork(
     short_name="HEVM",
     stables={
         "USDC": EvmToken("USDC", "0xb88339CB7199b77E23DB6E890353E22632Ba630f", 6),
+        "USDT": EvmToken("USDT", "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb", 6),
     },
 )
 
@@ -484,6 +485,7 @@ RELAY_API_URL = "https://api.relay.link"
 RELAY_RECEIPT_TIMEOUT_SEC = 3 * 60
 RELAY_STATUS_TIMEOUT_SEC = 15 * 60
 RELAY_STATUS_POLL_DELAY_SEC = 3
+RELAY_NONCE_SYNC_TIMEOUT_SEC = 30
 RELAY_GAS_BUFFER_PCT = 30
 RELAY_SLIPPAGE_BPS = 50
 RELAY_SDK_VERSION = "8.0.1"
@@ -597,6 +599,19 @@ async def _wait_relay_status(http: AsyncHttp, endpoint: str) -> None:
     raise TimeoutError("Relay transaction confirmation timed out")
 
 
+async def _wait_nonce_sync(rpc: RPC, owner: str) -> None:
+    deadline = time.monotonic() + RELAY_NONCE_SYNC_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        pending = await rpc.call("eth_getTransactionCount", owner, "pending")
+        latest = await rpc.call("eth_getTransactionCount", owner, "latest")
+        if pending == latest:
+            return
+
+        await asyncio.sleep(1)
+
+    raise TimeoutError(f"{rpc.network} wallet nonce did not synchronize")
+
+
 async def _execute_relay_step(
     http: AsyncHttp,
     rpc: RPC,
@@ -623,6 +638,7 @@ async def _execute_relay_item(
     symbol = network.native_token.symbol
     logger.info(f"{step_id.title()} submitted: fee {fee:,.8f} {symbol}; {url}")
     await wait_receipt(rpc, tx_hash, RELAY_RECEIPT_TIMEOUT_SEC)
+    await _wait_nonce_sync(rpc, account.address)
     if item.check:
         await _wait_relay_status(http, item.check.endpoint)
 

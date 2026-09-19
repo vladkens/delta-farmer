@@ -134,15 +134,20 @@ class AutoTable:
                 logger.error(f"Error formatting column '{col.name}' value {val!r}: {e}")
                 return "err"
 
-        tbl = Table(title=self.title, box=self.box, show_footer=True)
         totals = self._footer or self._compute_totals_for_rows(self.rows)
+        footers = [
+            fmt_cell(col, totals[i]) if col.grand_total else ""
+            for i, col in enumerate(self.columns)
+        ]
+        show_footer = any(footers)
+        tbl = Table(title=self.title, box=self.box, show_footer=show_footer)
 
         if self._groups:
             tbl.add_column(self._gtitle, justify="left")
 
         for i, col in enumerate(self.columns):
-            footer = fmt_cell(col, totals[i]) if col.grand_total else ""
-            if i == 0 and self._groups:
+            footer = footers[i]
+            if i == 0 and self._groups and show_footer:
                 footer = "TOTAL"
 
             tbl.add_column(col.name, justify=col.justify, footer=footer)

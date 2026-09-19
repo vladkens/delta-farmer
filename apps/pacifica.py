@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TypeVar
 
 from clients.pacifica import PacificaClient, PacificaPoint, PacificaTrade
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, create_clients, noop_command, run_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -105,7 +105,7 @@ async def print_stats(accs: list[PacificaClient], period="week", filter_period="
 
 
 async def main():
-    cli = await create_cli("pacifica", "configs/pacifica.toml", ["privkey"], evm=False)
+    cli = await create_cli("pacifica", "configs/pacifica.toml", ["privkey"])
     cfg = StrategyConfig.load(cli.config)
 
     all_accs, act_accs = await create_clients(cli, cfg.accounts, PacificaClient.from_config)
@@ -121,6 +121,8 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
+        case "move" | "deposit" | "withdraw":
+            noop_command("Pacifica", cli.command)
 
 
 if __name__ == "__main__":

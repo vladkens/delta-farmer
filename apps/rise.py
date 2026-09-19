@@ -5,7 +5,8 @@ from collections import defaultdict
 from decimal import Decimal
 
 from clients.rise import RiseClient, RisePoint, RiseTrade
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, create_clients, noop_command, run_app
+from lib.evm_cli import run_evm
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -122,6 +123,10 @@ async def main():
             await close_all(act_accs)
         case "trade":
             await run_groups(cfg, act_accs)
+        case "move":
+            await run_evm(cli, cfg.accounts)
+        case "deposit" | "withdraw":
+            noop_command("Rise", cli.command)
 
 
 if __name__ == "__main__":
