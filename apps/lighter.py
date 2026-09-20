@@ -1,13 +1,16 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
+import argparse
 import asyncio
 from decimal import Decimal
 
 from clients.lighter import LighterClient
 from lib.cli import create_cli, run_app, setup_app
 from lib.errors import AppError
+from lib.logger import logger
+from lib.models import TimeRange
 from lib.table import AutoTable, Column
-from lib.utils import gather_accs, short_addr
+from lib.utils import format_duration, gather_accs, short_addr
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups, select_strategy
@@ -16,6 +19,11 @@ from strategy.withdrawal import run_withdrawals
 
 class LighterConfig(DepositConfig):
     pass
+
+
+def setup_useref_cli(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("code", metavar="CODE", help="Referral code to apply")
+    parser.add_argument("-a", "--account", metavar="NAME", help="Use one enabled account")
 
 
 async def print_info(accs: list[LighterClient]):
@@ -59,10 +67,18 @@ async def print_info(accs: list[LighterClient]):
         p = await acc.profile()
         return ("✓", acc.name, a, p.volume, -p.pnl, p.points, p.balance, p.ref_code)
 
-    for item in await gather_accs(accs, row):
+    items = await gather_accs(accs, row)
+    for item in items:
         tbl.add_row(*item)
 
     tbl.print()
+    missing_refs = [item[1] for item in items if item[0] == "✓" and not item[-1]]
+    if missing_refs:
+        cmd = "uv run apps/lighter.py"
+        print()
+        print(f"Referral code missing: {', '.join(missing_refs)}")
+        print(f"  All enabled: {cmd} useref CODE")
+        print(f"  One account: {cmd} useref CODE -a {missing_refs[0]}")
 
 
 async def require_login(accs: list[LighterClient]) -> None:
@@ -71,6 +87,27 @@ async def require_login(accs: list[LighterClient]) -> None:
     if missing:
         names = ", ".join(missing)
         raise AppError(f"Login required: {names}. Run: uv run apps/lighter.py login")
+
+
+async def apply_referral_code(
+    accounts: list[LighterClient],
+    code: str,
+    delay: TimeRange,
+) -> None:
+    code = code.strip()
+    if not code:
+        raise AppError("Referral code cannot be empty")
+
+    for index, account in enumerate(accounts):
+        progress = f"{index + 1}/{len(accounts)}"
+        with logger.contextualize(account=account.name, progress=progress):
+            await account.use_referral_code(code)
+            logger.success("Referral code applied")
+
+        if index < len(accounts) - 1:
+            wait = delay.sample()
+            logger.info(f"Waiting {format_duration(wait)} before next account")
+            await asyncio.sleep(wait)
 
 
 def _select_account(
@@ -95,6 +132,7 @@ async def main():
         "lighter",
         "configs/lighter.toml",
         ["privkey"],
+        custom_commands={"useref": setup_useref_cli},
     )
     cfg = load_config(LighterConfig, cli.config)
     all_accs, act_accs = await setup_app(cli, cfg, LighterClient.from_config)
@@ -120,6 +158,9 @@ async def main():
                 accounts = _select_account(all_accs, act_accs, cli.account)
                 await require_login(accounts)
                 await run_withdrawals(accounts, cfg, withdraw_full=cli.full)
+            case "useref":
+                accounts = _select_account(all_accs, act_accs, cli.account)
+                await apply_referral_code(accounts, cli.code, cfg.balance_transfer_delay)
     finally:
         await asyncio.gather(*(acc.close() for acc in all_accs))
 

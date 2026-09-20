@@ -260,31 +260,32 @@ async def setup_app[T: CliClient](
     return all_clients, active_clients
 
 
-async def _show_banner(status: support.Status) -> None:
-    message = support.notice(status)
-    if _env_enabled("DF_NO_BANNER") and message is None:
+async def _show_banner(status: support.Status, *, show_support: bool = True) -> None:
+    message = support.notice(status) if show_support else None
+    if _env_enabled("DF_NO_BANNER") and status["state"] == "active":
         return
 
     eprint(f":: delta-farmer {VERSION}| https://x.com/uid127 | https://t.me/eazyrekt")
     if update := await latest_release_notice(VERSION):
         eprint(update)
     if message:
-        eprint(message)
+        console.print(message, highlight=False)
 
 
-async def _handle_license(action: str) -> None:
-    if action == "activate":
-        license = await support.activate(getpass.getpass("Supporter key: "))
-        paid_until = time.strftime("%Y-%m-%d", time.gmtime(license["paid_until"]))
-        eprint(
-            f"Supporter activated: {license['plan']}, {license['account_limit']} wallets, "
-            f"paid until {paid_until}."
-        )
-        return
-
+async def _handle_license() -> None:
     account_count = support.count_accounts()
     status = await support.get_status(account_count, force=True)
-    eprint(support.status_text(status))
+    console.print(support.status_banner(status, allow_upgrade=False), highlight=False)
+    if status["state"] != "none":
+        return
+
+    activation_key = getpass.getpass("Supporter key (leave blank to cancel): ").strip()
+    if not activation_key:
+        return
+
+    await support.activate(activation_key)
+    status = await support.get_status(account_count)
+    console.print(support.status_banner(status, allow_upgrade=False), highlight=False)
 
 
 def _load_accounts_config(filepath: str) -> list[AccountConfig]:
@@ -325,10 +326,7 @@ async def create_cli(
     sub.add_parser("addrs", help="Show configured wallet addresses")
     login_parser = sub.add_parser("login", help="Check and restore account logins")
     login_parser.add_argument("--force", action="store_true", help="Start with a fresh login")
-    license_parser = sub.add_parser("license", help="Manage Supporter subscription")
-    license_sub = license_parser.add_subparsers(dest="license_action", required=True)
-    license_sub.add_parser("activate", help="Activate a Supporter key")
-    license_sub.add_parser("status", help="Show Supporter status")
+    sub.add_parser("license", help="Show or activate Supporter subscription")
     sub.add_parser("proxy", help="Check configured proxies")
     sub.add_parser("clean", help="Delete cached data")
     sub.add_parser("tgtest", help=argparse.SUPPRESS)
@@ -374,10 +372,10 @@ async def create_cli(
         exit(1)
 
     if args.command in ("license", "config", "clean", "proxy", "tgtest"):
-        await _show_banner(await support.check([]))
+        await _show_banner(await support.check([]), show_support=args.command != "license")
 
     if args.command == "license":
-        await _handle_license(args.license_action)
+        await _handle_license()
         sys.exit(0)
 
     if args.command == "trade" and _env_enabled("DF_LOG_FILE"):

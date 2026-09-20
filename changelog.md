@@ -1,3 +1,22 @@
+## v0.10.0 – 2026-09-20
+
+### Features
+
+- Added Lighter support on Robinhood Chain with account setup, account information, positions, trading, closing, deposits, and withdrawals.
+- Added balance-targeted deposit and withdrawal plans for Omni and Lighter, including per-account selection and full-balance withdrawals.
+- Added shared `addrs` and `move` commands to inspect wallets and move supported assets across EVM networks or to configured exchange deposit addresses.
+- Added selectable named trading pools with independent account membership and strategy settings.
+- Added Ethereal reward discovery and claiming.
+- Added optional Supporter subscription activation and status commands without restricting existing features.
+
+### Improvements
+
+- Deprecated the closed HyENA and Ethereal integrations ahead of their removal.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.9.1...v0.10.0
+
+---
+
 ## v0.9.1 – 2026-09-04
 
 ### Features

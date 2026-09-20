@@ -87,11 +87,16 @@ async def test_enabled_accounts(monkeypatch):
     assert [client.name for client in active] == ["on"]
     check.assert_awaited_once_with(["wallet-on"])
     assert any("delta-farmer" in call.args[0] for call in eprint.call_args_list)
-    assert any("supporter: free" in call.args[0] for call in eprint.call_args_list)
+    assert not any("supporter" in call.args[0] for call in eprint.call_args_list)
 
 
 async def test_supporter_can_hide_banner_with_env(monkeypatch):
-    license = {"plan": "small", "account_limit": 5, "paid_until": 2_000_000_000}
+    license = {
+        "plan": "small",
+        "plan_name": "Solo",
+        "suggested_accounts": 5,
+        "paid_until": 2_000_000_000,
+    }
     check = AsyncMock(
         return_value={
             "state": "active",
@@ -160,15 +165,27 @@ async def test_trade_accepts_optional_pool(monkeypatch, argv, pool):
     assert args.pool == pool
 
 
-async def test_license_activate_uses_hidden_prompt(monkeypatch):
-    license = {"plan": "small", "account_limit": 5, "paid_until": 2_000_000_000}
+async def test_license_prompts_when_missing_then_shows_status(monkeypatch):
+    license = {
+        "plan": "small",
+        "plan_name": "Solo",
+        "suggested_accounts": 5,
+        "paid_until": 2_000_000_000,
+    }
+    missing = {"state": "none", "account_count": 6, "license": None, "offline": False}
+    active = {"state": "active", "account_count": 6, "license": license, "offline": False}
     activate = AsyncMock(return_value=license)
+    get_status = AsyncMock(side_effect=[missing, active])
     prompt = Mock(return_value="secret-key")
-    monkeypatch.setattr("lib.cli.sys.argv", ["exchange", "license", "activate"])
+    console_print = Mock()
+    monkeypatch.setattr("lib.cli.sys.argv", ["exchange", "license"])
     monkeypatch.setattr("lib.cli.getpass.getpass", prompt)
     monkeypatch.setattr("lib.cli.support.activate", activate)
+    monkeypatch.setattr("lib.cli.support.count_accounts", Mock(return_value=6))
+    monkeypatch.setattr("lib.cli.support.get_status", get_status)
     monkeypatch.setattr("lib.cli.support.check", AsyncMock())
     monkeypatch.setattr("lib.cli._show_banner", AsyncMock())
+    monkeypatch.setattr("lib.cli.console.print", console_print)
     monkeypatch.setattr("lib.cli.telemetry.init", Mock())
     monkeypatch.setattr("lib.cli.telemetry.flush", AsyncMock())
 
@@ -176,5 +193,40 @@ async def test_license_activate_uses_hidden_prompt(monkeypatch):
         await create_cli("exchange", "config.toml", ["privkey"])
 
     assert exc.value.code == 0
-    prompt.assert_called_once_with("Supporter key: ")
+    prompt.assert_called_once_with("Supporter key (leave blank to cancel): ")
     assert activate.await_args.args[0] == "secret-key"
+    assert get_status.await_args_list == [call(6, force=True), call(6)]
+    assert [entry.args[0].plain for entry in console_print.call_args_list] == [
+        ":: free  |   6 accounts / 30d · support the work → t.me/deltafarm_bot",
+        "◆  solo  |   6 accounts / 30d · thank you for supporting the work",
+    ]
+
+
+async def test_license_with_saved_key_only_shows_status(monkeypatch):
+    license = {
+        "plan": "small",
+        "plan_name": "Solo",
+        "suggested_accounts": 5,
+        "paid_until": 2_000_000_000,
+    }
+    status = {"state": "active", "account_count": 3, "license": license, "offline": False}
+    prompt = Mock()
+    console_print = Mock()
+    monkeypatch.setattr("lib.cli.sys.argv", ["exchange", "license"])
+    monkeypatch.setattr("lib.cli.getpass.getpass", prompt)
+    monkeypatch.setattr("lib.cli.support.count_accounts", Mock(return_value=3))
+    monkeypatch.setattr("lib.cli.support.get_status", AsyncMock(return_value=status))
+    monkeypatch.setattr("lib.cli.support.check", AsyncMock())
+    monkeypatch.setattr("lib.cli._show_banner", AsyncMock())
+    monkeypatch.setattr("lib.cli.console.print", console_print)
+    monkeypatch.setattr("lib.cli.telemetry.init", Mock())
+    monkeypatch.setattr("lib.cli.telemetry.flush", AsyncMock())
+
+    with pytest.raises(SystemExit) as exc:
+        await create_cli("exchange", "config.toml", ["privkey"])
+
+    assert exc.value.code == 0
+    prompt.assert_not_called()
+    assert console_print.call_args.args[0].plain == (
+        "◆  solo  |   3 accounts / 30d · thank you for supporting the work"
+    )

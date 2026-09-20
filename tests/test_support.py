@@ -1,6 +1,7 @@
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
+from unittest.mock import AsyncMock
 
 import jwt
 import pytest
@@ -18,15 +19,21 @@ def use_temp_db(monkeypatch, tmp_path):
     monkeypatch.setattr(support, "_key", SIGNING_KEY.public_key())
 
 
-def make_license(*, paid_until: int, account_limit: int = 5) -> support.License:
-    return {"plan": "small", "account_limit": account_limit, "paid_until": paid_until}
+def make_license(*, paid_until: int, suggested_accounts: int = 5) -> support.License:
+    return {
+        "plan": "small",
+        "plan_name": "Solo",
+        "suggested_accounts": suggested_accounts,
+        "paid_until": paid_until,
+    }
 
 
 def make_receipt(license: support.License) -> tuple[str, support.License]:
     payload = {
         "sub": "license-1",
         "plan": license["plan"],
-        "account_limit": license["account_limit"],
+        "plan_name": license["plan_name"],
+        "suggested_accounts": license["suggested_accounts"],
         "key_hash": sha256(support.normalize_key(KEY).encode()).hexdigest(),
         "iat": 100,
         "exp": license["paid_until"],
@@ -133,6 +140,27 @@ async def test_status_uses_offline_grace_and_never_blocks(monkeypatch):
         "account_count": 0,
         "license": None,
         "offline": True,
+        "banner_enabled": False,
+    }
+
+
+async def test_status_reports_expired_after_refresh(monkeypatch):
+    license = make_license(paid_until=1_000)
+    token, _license = make_receipt(license)
+    support.save_subscription(KEY, token, checked_at=0)
+
+    async def fetch_license(_key: str):
+        return token, license
+
+    monkeypatch.setattr(support, "fetch_license", fetch_license)
+
+    status = await support.get_status(2, now=2_000, force=True)
+
+    assert status == {
+        "state": "expired",
+        "account_count": 2,
+        "license": license,
+        "offline": False,
     }
 
 
@@ -142,13 +170,66 @@ def test_modified_token_is_rejected():
         support.decode_token(token + "x", KEY)
 
 
-def test_notice_is_advisory():
-    license = make_license(paid_until=1_000)
-    active = {"state": "active", "account_count": 5, "license": license, "offline": False}
-    over_limit = {"state": "active", "account_count": 6, "license": license, "offline": False}
-
-    assert support.notice(active) is None
-    assert "6 accounts last month" in support.notice(over_limit)
-    assert "supporter: free" in support.notice(
-        {"state": "none", "account_count": 3, "license": None, "offline": False}
+async def test_check_requests_banner_with_local_account_count(monkeypatch):
+    status = {"state": "none", "account_count": 7, "license": None, "offline": False}
+    get_status = AsyncMock(return_value=status)
+    fetch_banner = AsyncMock(
+        return_value={"recommended_plan": "medium", "recommended_plan_name": "Pro"}
     )
+    monkeypatch.setattr(support, "record_accounts", lambda _addresses: 7)
+    monkeypatch.setattr(support, "get_status", get_status)
+    monkeypatch.setattr(support, "fetch_banner", fetch_banner)
+
+    result = await support.check(["wallet"])
+
+    get_status.assert_awaited_once_with(7)
+    fetch_banner.assert_awaited_once_with(7)
+    assert result["banner_enabled"] is True
+    assert result["recommended_plan"] == "medium"
+    assert result["recommended_plan_name"] == "Pro"
+
+
+def test_notice_requires_server_permission():
+    license = make_license(paid_until=1_000)
+    active = {
+        "state": "active",
+        "account_count": 5,
+        "license": license,
+        "offline": False,
+        "banner_enabled": True,
+    }
+    hidden = {
+        "state": "none",
+        "account_count": 7,
+        "license": None,
+        "offline": False,
+        "banner_enabled": False,
+    }
+    visible = {**hidden, "banner_enabled": True}
+
+    assert support.notice(hidden) is None
+    assert support.notice(active).plain == (
+        "◆  solo  |   5 accounts / 30d · thank you for supporting the work"
+    )
+    assert support.notice(visible).plain == (
+        ":: free  |   7 accounts / 30d · support the work → t.me/deltafarm_bot"
+    )
+
+    upgrade = {
+        **active,
+        "account_count": 7,
+        "recommended_plan": "medium",
+        "recommended_plan_name": "Pro",
+    }
+    assert support.notice(upgrade).plain == (
+        ":: solo  |   7 accounts / 30d · pro fits your setup → t.me/deltafarm_bot"
+    )
+
+
+def test_license_without_plan_name_still_renders():
+    license = support.parse_license(
+        {"plan": "small", "suggested_accounts": 5, "paid_until": 2_000_000_000}
+    )
+    status = {"state": "active", "account_count": 3, "license": license, "offline": False}
+
+    assert support.status_banner(status).plain.startswith("◆  small  |")

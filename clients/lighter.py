@@ -15,7 +15,7 @@ from eth_account.messages import encode_defunct
 from pydantic import BaseModel, Field
 
 from lib import utils
-from lib.decorators import bind_log_context, locked, ttl_cache
+from lib.decorators import bind_log_context, locked, retry, ttl_cache
 from lib.errors import AppError
 from lib.evm import (
     ROBINHOOD,
@@ -242,6 +242,7 @@ class LighterClient:
     async def _system_config(self) -> dict:
         return await self._call("GET", "/api/v1/systemConfig")
 
+    @retry(max_attempts=5, delay=1.0)
     async def _get_volume(self, account_index: int) -> Decimal:
         auth = self._get_auth_headers(account_index)["Authorization"]
         channel = f"account_all_trades/{account_index}"
