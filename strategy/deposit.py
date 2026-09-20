@@ -13,7 +13,6 @@ from lib.errors import AppError
 from lib.evm import EvmNetwork, EvmToken
 from lib.http import ApiError
 from lib.logger import logger
-from lib.models import DurationSec, TimeRange
 from lib.table import AutoTable, Column
 from lib.utils import confirm, format_duration
 
@@ -42,7 +41,6 @@ class DepositConfig(StrategyConfig):
     balance_target: Decimal | None = Field(None, gt=0)
     balance_target_jitter_pct: Decimal = Field(Decimal(2), ge=0, lt=100)
     deposit_min_amount: Decimal = Field(Decimal(10), ge=0)
-    balance_transfer_delay: TimeRange = TimeRange(min=DurationSec("2m"), max=DurationSec("4m"))
 
 
 @dataclass(frozen=True)

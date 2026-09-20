@@ -20,9 +20,9 @@ from . import support, telemetry
 from . import telegram as tg
 from .crypto import config_cli_parser
 from .errors import AppError
-from .evm_cli import setup_evm_cli
 from .logger import enable_file_logging, logger
 from .models import AccountConfig
+from .move_cmd import MoveConfig, run_move, setup_move_cmd
 from .proxy import print_proxies
 from .table import AutoTable, Column
 from .telegram import TgConfig
@@ -229,13 +229,13 @@ def _print_addresses(clients: Sequence[AddressClient]) -> None:
     table.print()
 
 
-async def create_clients[T: CliClient](
+async def setup_app[T: CliClient](
     args: argparse.Namespace,
-    accounts: list[AccountConfig],
+    cfg: MoveConfig,
     factory: Callable[[AccountConfig], T],
 ) -> tuple[list[T], list[T]]:
-    """Build account clients and handle common CLI commands that require them."""
-    clients = [(factory(account), account.enabled) for account in accounts]
+    """Set up clients and handle common commands that need the application config."""
+    clients = [(factory(account), account.enabled) for account in cfg.accounts]
     all_clients = [client for client, _enabled in clients]
     active_clients = [client for client, enabled in clients if enabled]
 
@@ -251,6 +251,10 @@ async def create_clients[T: CliClient](
 
     if args.command == "addrs":
         _print_addresses(all_clients)
+        sys.exit(0)
+
+    if args.command == "move":
+        await run_move(args, cfg)
         sys.exit(0)
 
     return all_clients, active_clients
@@ -307,6 +311,8 @@ async def create_cli(
     config_path: str,
     sec_fields: list[str],
     custom_commands: dict[str, Callable[[argparse.ArgumentParser], None]] | None = None,
+    *,
+    evm: bool = True,
 ) -> argparse.Namespace:
     cli = CliParser(prog=name, formatter_class=HelpFormatter)
 
@@ -325,7 +331,9 @@ async def create_cli(
     sub.add_parser("proxy", help="Check configured proxies")
     sub.add_parser("clean", help="Delete cached data")
     sub.add_parser("tgtest", help=argparse.SUPPRESS)
-    setup_evm_cli(sub.add_parser("move", help="Show movable balances or move assets"))
+    if evm:
+        setup_move_cmd(sub.add_parser("move", help="Show movable balances or move assets"))
+
     deposit_parser = sub.add_parser("deposit", help="Deposit funds")
     deposit_parser.add_argument("-a", "--account", metavar="NAME", help="Use one enabled account")
     withdraw_parser = sub.add_parser("withdraw", help="Withdraw funds")

@@ -7,8 +7,7 @@ from decimal import Decimal
 from typing import TypeVar
 
 from clients.nado import NadoClient, NadoPoint, NadoTrade
-from lib.cli import create_cli, create_clients, noop_command, run_app
-from lib.evm_cli import run_evm
+from lib.cli import create_cli, noop_command, run_app, setup_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
@@ -110,7 +109,7 @@ async def main():
     cli = await create_cli("nado", "configs/nado.toml", ["privkey"])
     cfg = StrategyConfig.load(cli.config)
 
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, NadoClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, NadoClient.from_config)
 
     match cli.command:
         case "info":
@@ -123,8 +122,6 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
-        case "move":
-            await run_evm(cli, cfg.accounts)
         case "deposit" | "withdraw":
             noop_command("Nado", cli.command)
 

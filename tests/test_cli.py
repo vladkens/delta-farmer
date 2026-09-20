@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from lib.cli import CliParser, _handle_login, create_cli, create_clients
+from lib.cli import CliParser, _handle_login, create_cli, setup_app
 from lib.errors import AppError
 from lib.models import AccountConfig
 from lib.utils import confirm
@@ -78,8 +78,9 @@ async def test_enabled_accounts(monkeypatch):
     monkeypatch.setattr("lib.cli.latest_release_notice", AsyncMock(return_value=None))
     monkeypatch.setenv("DF_NO_BANNER", "1")
 
-    all_clients, active = await create_clients(
-        argparse.Namespace(command="info"), accounts, lambda account: Client(account.name)
+    cfg = Mock(accounts=accounts)
+    all_clients, active = await setup_app(
+        argparse.Namespace(command="info"), cfg, lambda account: Client(account.name)
     )
 
     assert [client.name for client in all_clients] == ["on", "off"]
@@ -105,14 +106,39 @@ async def test_supporter_can_hide_banner_with_env(monkeypatch):
     monkeypatch.setattr("lib.cli.latest_release_notice", AsyncMock(return_value=None))
     monkeypatch.setenv("DF_NO_BANNER", "1")
 
-    await create_clients(
+    await setup_app(
         argparse.Namespace(command="info"),
-        [AccountConfig(name="on", privkey="x")],
+        Mock(accounts=[AccountConfig(name="on", privkey="x")]),
         lambda account: Client(account.name),
     )
 
     check.assert_awaited_once_with(["wallet-on"])
     eprint.assert_not_called()
+
+
+async def test_setup_app_handles_move(monkeypatch):
+    args = argparse.Namespace(command="move")
+    cfg = Mock(accounts=[AccountConfig(name="on", privkey="x")])
+    run_move = AsyncMock()
+    monkeypatch.setattr("lib.cli.support.check", AsyncMock(return_value={}))
+    monkeypatch.setattr("lib.cli._show_banner", AsyncMock())
+    monkeypatch.setattr("lib.cli.run_move", run_move)
+
+    with pytest.raises(SystemExit) as exc:
+        await setup_app(args, cfg, lambda account: Client(account.name))
+
+    assert exc.value.code == 0
+    run_move.assert_awaited_once_with(args, cfg)
+
+
+async def test_non_evm_cli_omits_move(monkeypatch, capsys):
+    monkeypatch.setattr("lib.cli.sys.argv", ["pacifica", "move"])
+
+    with pytest.raises(SystemExit) as exc:
+        await create_cli("pacifica", "config.toml", ["privkey"], evm=False)
+
+    assert exc.value.code == 2
+    assert "unknown command: 'move'" in capsys.readouterr().err
 
 
 async def test_license_activate_uses_hidden_prompt(monkeypatch):

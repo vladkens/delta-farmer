@@ -11,9 +11,8 @@ from typing import Self
 from pydantic import Field, SecretStr
 
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, run_app, setup_app
 from lib.errors import AppError
-from lib.evm_cli import run_evm
 from lib.http import ApiError
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -308,7 +307,7 @@ async def main():
     if key := cfg.captcha_key.get_secret_value():
         os.environ["CAPTCHA_KEY"] = key
 
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, OmniClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, OmniClient.from_config)
 
     match cli.command:
         case "info":
@@ -322,8 +321,6 @@ async def main():
             await run_groups(cfg, act_accs)
         case "positions":
             await print_positions(act_accs)
-        case "move":
-            await run_evm(cli, cfg.accounts)
         case "competition":
             await run_competition(all_accs, auto_join=cli.join)
         case "deposit":

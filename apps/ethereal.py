@@ -5,9 +5,8 @@ from collections import defaultdict
 from decimal import Decimal
 
 from clients.ethereal import EtherealClient, EtherealPoint, EtherealPosition, EtherealReward
-from lib.cli import create_cli, create_clients, noop_command, print_deprecation_notice, run_app
+from lib.cli import create_cli, noop_command, print_deprecation_notice, run_app, setup_app
 from lib.errors import AppError
-from lib.evm_cli import run_evm
 from lib.logger import logger
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
@@ -172,7 +171,7 @@ async def main():
     )
     cfg = StrategyConfig.load(cli.config)
 
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, EtherealClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, EtherealClient.from_config)
     print_deprecation_notice("Ethereal closed; removed next release. https://app.ethereal.trade/")
 
     match cli.command:
@@ -189,8 +188,6 @@ async def main():
             await print_positions(act_accs)
         case "claim":
             await claim_rewards(all_accs)
-        case "move":
-            await run_evm(cli, cfg.accounts)
         case "deposit" | "withdraw":
             noop_command("Ethereal", cli.command)
 

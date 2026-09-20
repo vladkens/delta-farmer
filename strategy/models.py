@@ -201,6 +201,7 @@ class StrategyConfig(BaseModel):
     """Base config for trading strategies."""
 
     accounts: list[AccountConfig]
+    balance_transfer_delay: TimeRange = TimeRange(min=DurationSec("2m"), max=DurationSec("4m"))
     symbols: list[str] = Field(..., min_length=1)
     symbols_per_trade: int = Field(1, gt=0, le=4)
     leverage: int = Field(10, gt=0, lt=50)

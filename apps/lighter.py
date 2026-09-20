@@ -4,9 +4,8 @@ import asyncio
 from decimal import Decimal
 
 from clients.lighter import LighterClient
-from lib.cli import create_cli, create_clients, run_app
+from lib.cli import create_cli, run_app, setup_app
 from lib.errors import AppError
-from lib.evm_cli import run_evm
 from lib.table import AutoTable, Column
 from lib.utils import gather_accs, short_addr
 from strategy import load_config
@@ -98,7 +97,7 @@ async def main():
         ["privkey"],
     )
     cfg = load_config(LighterConfig, cli.config)
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, LighterClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, LighterClient.from_config)
 
     try:
         match cli.command:
@@ -112,10 +111,9 @@ async def main():
                 await run_groups(cfg, act_accs)
             case "positions":
                 await print_positions(act_accs)
-            case "move":
-                await run_evm(cli, cfg.accounts)
             case "deposit":
                 accounts = _select_account(all_accs, act_accs, cli.account)
+                await require_login(accounts)
                 await run_deposits(accounts, cfg)
             case "withdraw":
                 accounts = _select_account(all_accs, act_accs, cli.account)

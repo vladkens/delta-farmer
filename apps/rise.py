@@ -5,8 +5,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from clients.rise import RiseClient, RisePoint, RiseTrade
-from lib.cli import create_cli, create_clients, noop_command, run_app
-from lib.evm_cli import run_evm
+from lib.cli import create_cli, noop_command, run_app, setup_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
@@ -110,7 +109,7 @@ async def main():
     cli = await create_cli("rise", "configs/rise.toml", ["privkey"])
     cfg = StrategyConfig.load(cli.config)
 
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, RiseClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, RiseClient.from_config)
 
     match cli.command:
         case "info":
@@ -123,8 +122,6 @@ async def main():
             await close_all(act_accs)
         case "trade":
             await run_groups(cfg, act_accs)
-        case "move":
-            await run_evm(cli, cfg.accounts)
         case "deposit" | "withdraw":
             noop_command("Rise", cli.command)
 

@@ -536,6 +536,9 @@ class RelayQuote(BaseModel):
     minimum_output_amount: int = Field(validation_alias=AliasPath(*_RELAY_OUT, "minimumAmount"))
     input_usd: Decimal | None = Field(None, validation_alias=AliasPath(*_RELAY_IN, "amountUsd"))
     output_usd: Decimal | None = Field(None, validation_alias=AliasPath(*_RELAY_OUT, "amountUsd"))
+    gas_topup_usd: Decimal = Field(
+        Decimal(0), validation_alias=AliasPath("details", "currencyGasTopup", "amountUsd")
+    )
     quoted_gas: str | int | None = Field(None, validation_alias=AliasPath(*_RELAY_GAS))
     time_estimate: int = Field(0, validation_alias=AliasPath("details", "timeEstimate"), ge=0)
     steps: list[RelayStep]
@@ -557,6 +560,7 @@ async def _get_relay_quote(
     source: str,
     target: str,
     amount: int,
+    topup_gas: bool = False,
 ) -> RelayQuote:
     origin_network, origin_token = resolve_evm_asset(source)
     destination_network, destination_token = resolve_evm_asset(target)
@@ -574,6 +578,9 @@ async def _get_relay_quote(
         "useFallbacks": False,
         "usePermit": False,
     }
+    if topup_gas:
+        pld["topupGas"] = True
+
     res = await http.request("POST", "/quote/v2", json=pld)
     if not res.ok:
         raise ApiError("Relay quote failed", res)
@@ -650,6 +657,7 @@ async def relay_move(
     quantity: str,
     proxy: str | None = None,
     minimum_usd: Decimal = Decimal(0),
+    topup_gas: bool = False,
 ) -> RelayQuote:
     origin_network, origin_token = resolve_evm_asset(source)
     destination_network, destination_token = resolve_evm_asset(target)
@@ -675,19 +683,22 @@ async def relay_move(
         if amount <= 0 or amount > balance:
             raise ValueError(f"Insufficient {source} balance")
 
-        quote = await _get_relay_quote(http, account.address, source, target, amount)
+        quote = await _get_relay_quote(http, account.address, source, target, amount, topup_gas)
         required_gas = quote.required_gas
         if quantity == "max" and origin_token.address.lower() == ZERO_ADDRESS:
             amount = native_balance - required_gas
             if amount <= 0:
                 raise ValueError(f"Insufficient {source} balance for gas")
 
-            quote = await _get_relay_quote(http, account.address, source, target, amount)
+            quote = await _get_relay_quote(http, account.address, source, target, amount, topup_gas)
             required_gas = quote.required_gas
 
         spent = quote.input_amount if origin_token.address.lower() == ZERO_ADDRESS else 0
         if spent + required_gas > native_balance:
             raise ValueError(f"Insufficient {origin_network.code} gas")
+
+        if topup_gas and quote.gas_topup_usd <= 0:
+            raise ApiError("Relay route does not provide the requested gas top-up")
 
         validate_relay_quote(quote, minimum_usd)
         if origin_network != destination_network and not any(
@@ -730,7 +741,7 @@ def validate_relay_quote(quote: RelayQuote, minimum_usd: Decimal = Decimal(0)) -
     minimum_output_usd = (
         quote.output_usd * Decimal(quote.minimum_output_amount) / Decimal(quote.output_amount)
     )
-    loss = quote.input_usd - minimum_output_usd
+    loss = quote.input_usd - minimum_output_usd - quote.gas_topup_usd
     allowed = max(RELAY_MAX_LOSS_USD, quote.input_usd * RELAY_MAX_LOSS_PCT / 100)
     if loss > allowed:
         raise ApiError(f"Relay route loss is too high: ${loss:,.2f}")

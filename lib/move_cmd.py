@@ -3,6 +3,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Protocol
 
 from eth_account.signers.local import LocalAccount
 from rich import print as console_print
@@ -13,6 +14,7 @@ from .evm import (
     EVM_NETWORKS,
     ZERO_ADDRESS,
     EvmNetwork,
+    EvmToken,
     get_evm_balances,
     relay_move,
     resolve_evm_asset,
@@ -20,12 +22,13 @@ from .evm import (
     transfer_evm_asset,
 )
 from .logger import logger
-from .models import AccountConfig
+from .models import AccountConfig, TimeRange
 from .table import AutoTable, Column
-from .utils import confirm, parse_eth_key, short_addr
+from .utils import confirm, format_duration, parse_eth_key, short_addr
 
 EVM_START_DELAY_SEC = 1.5
 EVM_MIN_MOVE_AMOUNT = Decimal(1)
+LOW_NATIVE_AMOUNT = Decimal("0.002")
 
 
 @dataclass
@@ -36,10 +39,15 @@ class WalletState:
     errors: dict[str, str]
 
 
+class MoveConfig(Protocol):
+    accounts: list[AccountConfig]
+    balance_transfer_delay: TimeRange
+
+
 type EvmAction = tuple[str, WalletState, str, str, str]
 
 
-def setup_evm_cli(parser: argparse.ArgumentParser) -> None:
+def setup_move_cmd(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-a", "--account", default=None, help="Use one enabled account")
     parser.add_argument(
         "source",
@@ -65,14 +73,45 @@ def _format_amount(amount: Decimal) -> str:
     return f"{amount:,.2f}"
 
 
-def _stable_balances(state: WalletState) -> list[tuple[str, str, Decimal]]:
+def _format_native(amount: Decimal, symbol: str) -> str:
+    value = f"{amount:,.6f} {symbol}"
+    if amount == 0:
+        return f"[red]{value}[/red]"
+    if amount < LOW_NATIVE_AMOUNT:
+        return f"[yellow]{value}[/yellow]"
+
+    return value
+
+
+def _needs_gas_topup(
+    balances: dict[str, Decimal],
+    source_network: EvmNetwork,
+    target_network: EvmNetwork,
+    target_token: EvmToken,
+) -> bool:
+    if source_network == target_network or target_token.address.lower() == ZERO_ADDRESS:
+        return False
+
+    native_asset = target_network.asset_code(target_network.native_token)
+    return balances.get(native_asset, Decimal(0)) < LOW_NATIVE_AMOUNT
+
+
+def _stable_balances(state: WalletState) -> list[tuple[str, str, Decimal, str]]:
     rows = []
     for asset, balance in state.balances.items():
         network, token = resolve_evm_asset(asset)
         if token.symbol not in network.stables or balance < Decimal("0.01"):
             continue
 
-        rows.append((network.code, token.symbol.lower(), balance))
+        native = state.balances.get(network.asset_code(network.native_token), Decimal(0))
+        rows.append(
+            (
+                network.code,
+                token.symbol.lower(),
+                balance,
+                _format_native(native, network.native_token.symbol),
+            )
+        )
 
     rows.sort(key=lambda row: row[2], reverse=True)
     return rows
@@ -150,19 +189,21 @@ def _print_status(states: list[WalletState]) -> None:
         Column("Address", justify="left"),
         Column("Network", justify="left"),
         Column("Asset", justify="left"),
-        Column("Balance"),
+        Column("Amount"),
+        Column("Native"),
     )
     empty_accounts = []
 
     for state in states:
         rows = _stable_balances(state)
-        for network, token, balance in rows:
+        for network, token, balance, native in rows:
             table.add_row(
                 state.config.name,
                 short_addr(state.account.address),
                 network,
                 token,
                 _format_amount(balance),
+                native,
             )
 
         for network in state.errors:
@@ -172,13 +213,14 @@ def _print_status(states: list[WalletState]) -> None:
                 network,
                 "",
                 "[yellow]unavailable[/yellow]",
+                "",
             )
 
         if not rows and not state.errors:
             empty_accounts.append(state.config.name)
 
     if empty_accounts:
-        table.set_footer("No stables:", "", ", ".join(empty_accounts), "", "")
+        table.set_footer("No stables:", "", ", ".join(empty_accounts), "", "", "")
 
     table.print()
     for state in states:
@@ -218,11 +260,21 @@ def _plan_table(plan: list[EvmAction]) -> AutoTable:
     return table
 
 
-async def _execute_plan(plan: list[EvmAction]) -> None:
+async def _execute_plan(plan: list[EvmAction], delay: TimeRange) -> None:
+    gas_topped_up: set[str] = set()
     for index, (operation, state, source, target, quantity) in enumerate(plan):
         progress = f"{index + 1}/{len(plan)}"
         with logger.contextualize(account=state.config.name, progress=progress):
             if operation == "move":
+                source_network, _ = resolve_evm_asset(source)
+                target_network, target_token = resolve_evm_asset(target)
+                owner = state.account.address.lower()
+                topup_gas = owner not in gas_topped_up and _needs_gas_topup(
+                    state.balances,
+                    source_network,
+                    target_network,
+                    target_token,
+                )
                 await relay_move(
                     state.account,
                     source,
@@ -230,10 +282,11 @@ async def _execute_plan(plan: list[EvmAction]) -> None:
                     quantity,
                     state.config.proxy,
                     EVM_MIN_MOVE_AMOUNT,
+                    topup_gas=topup_gas,
                 )
-                continue
-
-            if operation == "transfer":
+                if topup_gas:
+                    gas_topped_up.add(owner)
+            elif operation == "transfer":
                 await transfer_evm_asset(
                     state.account,
                     source,
@@ -241,9 +294,13 @@ async def _execute_plan(plan: list[EvmAction]) -> None:
                     quantity,
                     state.config.proxy,
                 )
-                continue
+            else:
+                raise ValueError(f"Unknown EVM operation: {operation}")
 
-            raise ValueError(f"Unknown EVM operation: {operation}")
+        if index < len(plan) - 1 and plan[index + 1][1] is not state:
+            wait = delay.sample()
+            logger.info(f"Waiting {format_duration(wait)} before next account")
+            await asyncio.sleep(wait)
 
 
 def _make_plan(
@@ -327,6 +384,7 @@ async def _move(
     source_value: str,
     target_value: str,
     amount: Decimal | None,
+    delay: TimeRange,
 ) -> None:
     source = source_value.lower()
     target = target_value.lower()
@@ -356,14 +414,14 @@ async def _move(
 
     await asyncio.sleep(EVM_START_DELAY_SEC)
     print("-" * 60)
-    await _execute_plan(plan)
+    await _execute_plan(plan, delay)
 
 
-async def run_evm(
+async def run_move(
     args: argparse.Namespace,
-    accounts: list[AccountConfig],
+    cfg: MoveConfig,
 ) -> None:
-    accounts = _select_accounts(accounts, getattr(args, "account", None))
+    accounts = _select_accounts(cfg.accounts, getattr(args, "account", None))
     if not accounts:
         raise AppError("No enabled accounts configured")
 
@@ -382,4 +440,4 @@ async def run_evm(
         _validate_cex_addrs(accounts)
 
     states = await _scan(accounts)
-    await _move(states, args.source, args.target, args.amount)
+    await _move(states, args.source, args.target, args.amount, cfg.balance_transfer_delay)

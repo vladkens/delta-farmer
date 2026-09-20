@@ -10,8 +10,7 @@ from rich.console import Console
 
 from clients.hyena import HyenaClient
 from clients.hyperliquid import migrate_hyperliquid_accounts, warn_legacy_hyperliquid_accounts
-from lib.cli import create_cli, create_clients, noop_command, print_deprecation_notice, run_app
-from lib.evm_cli import run_evm
+from lib.cli import create_cli, noop_command, print_deprecation_notice, run_app, setup_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
@@ -194,7 +193,7 @@ async def main():
     cfg = StrategyConfig.load(cli.config)
     cfg.symbols = _normalize_symbols(cfg.symbols)
 
-    all_accs, act_accs = await create_clients(cli, cfg.accounts, HyenaClient.from_config)
+    all_accs, act_accs = await setup_app(cli, cfg, HyenaClient.from_config)
     print_deprecation_notice(
         "HyENA closed; removed next release. https://www.chaincatcher.com/en/article/2286294"
     )
@@ -214,8 +213,6 @@ async def main():
             await migrate_hyperliquid_accounts(all_accs, "Hyena")
         case "trade":
             await run_groups(cfg, act_accs)
-        case "move":
-            await run_evm(cli, cfg.accounts)
         case "deposit" | "withdraw":
             noop_command("Hyena", cli.command)
 
