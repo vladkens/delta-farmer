@@ -8,7 +8,7 @@ from lib.logger import logger
 from lib.utils import find_safe_pair, round_to_tick_size
 
 from .execution import fill_limit_order, wait_for_entry_quality
-from .models import Position, Side, StrategyConfig, TradingClient, opposite_side, usd_to_qty
+from .models import Position, Side, TradeConfig, TradingClient, opposite_side, usd_to_qty
 
 USD_TICK = Decimal("0.01")
 SAFE_PCT = Decimal("0.96")  # leave 4% margin to avoid liquidation on leverage rounding
@@ -21,7 +21,7 @@ async def _fill_limit_order(
     symbol: str,
     side: Side,
     qty: Decimal,
-    cfg: StrategyConfig,
+    cfg: TradeConfig,
     reduce_only=False,
 ):
     return await fill_limit_order(
@@ -199,13 +199,13 @@ class DeltaTrade:
         failed_accs = ", ".join(act.client.name for act, _ in vals)
         raise RuntimeError(f"Trade size below minimum for: {failed_accs}")
 
-    async def gate(self, cfg: StrategyConfig) -> bool:
+    async def gate(self, cfg: TradeConfig) -> bool:
         rs = await wait_for_entry_quality(
             self.lead.client, self.symbol, [(leg.side, leg.qty) for leg in self.legs], cfg
         )
         return rs is not None
 
-    async def open(self, cfg: StrategyConfig) -> bool:
+    async def open(self, cfg: TradeConfig) -> bool:
         if cfg.use_limit:
             clt, side, qty = self.lead.client, self.lead.side, self.lead.qty
             order = await _fill_limit_order(clt, self.symbol, side, qty, cfg)
@@ -224,7 +224,7 @@ class DeltaTrade:
         # todo: report opened log with spread info
         return True
 
-    async def close(self, cfg: StrategyConfig, use_limit=False) -> None:
+    async def close(self, cfg: TradeConfig, use_limit=False) -> None:
         if use_limit:
             for pos in await self._positions(self.lead.client):
                 clt, side = self.lead.client, opposite_side(pos.side)
@@ -245,7 +245,7 @@ class DeltaTrade:
     async def _positions(self, client: TradingClient) -> list[Position]:
         return [p for p in await client.positions() if p.symbol == self.symbol]
 
-    async def state(self, cfg: StrategyConfig) -> DeltaTradeSummary:
+    async def state(self, cfg: TradeConfig) -> DeltaTradeSummary:
         roi_limit = Decimal(str(cfg.position_roi_limit))
 
         async def leg_data(leg: DeltaLeg) -> tuple[Decimal, Decimal, Decimal, bool] | None:

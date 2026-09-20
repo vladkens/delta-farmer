@@ -141,6 +141,25 @@ async def test_non_evm_cli_omits_move(monkeypatch, capsys):
     assert "unknown command: 'move'" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("argv", "pool"),
+    [
+        (["exchange", "trade"], None),
+        (["exchange", "trade", "stock"], "stock"),
+    ],
+)
+async def test_trade_accepts_optional_pool(monkeypatch, argv, pool):
+    monkeypatch.setattr("lib.cli.sys.argv", argv)
+    monkeypatch.setattr("lib.cli._load_tg_config", Mock(return_value=Mock()))
+    monkeypatch.setattr("lib.cli.tg.init", Mock())
+    monkeypatch.setattr("lib.cli.telemetry.init", Mock())
+    monkeypatch.delenv("DF_LOG_FILE", raising=False)
+
+    args = await create_cli("exchange", "config.toml", ["privkey"])
+
+    assert args.pool == pool
+
+
 async def test_license_activate_uses_hidden_prompt(monkeypatch):
     license = {"plan": "small", "account_limit": 5, "paid_until": 2_000_000_000}
     activate = AsyncMock(return_value=license)

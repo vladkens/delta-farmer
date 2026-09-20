@@ -15,7 +15,7 @@ from lib.logger import logger
 from lib.utils import round_to_tick_size
 
 from .execution import close_all
-from .models import MarketHoursMode, StrategyConfig, TradingClient, trading_client_trace
+from .models import MarketHoursMode, TradeConfig, TradingClient, trading_client_trace
 from .symbols import filter_exchange_symbols
 from .trade import DeltaTrade, DeltaTradeSummary, plan_delta_trades
 
@@ -118,7 +118,7 @@ class DeltaStrategy:
 
     def __init__(
         self,
-        cfg: StrategyConfig,
+        cfg: TradeConfig,
         accounts: Sequence[TradingClient],
         stop_event: asyncio.Event | None = None,
     ):

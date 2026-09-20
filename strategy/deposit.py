@@ -16,7 +16,7 @@ from lib.logger import logger
 from lib.table import AutoTable, Column
 from lib.utils import confirm, format_duration
 
-from .models import StrategyConfig
+from .models import AppConfig
 
 DEPOSIT_CREDIT_TIMEOUT_SEC = 30 * 60
 DEPOSIT_POLL_DELAY = 10
@@ -37,7 +37,7 @@ class DepositClient(Protocol):
     async def deposit_balance(self) -> Decimal: ...
 
 
-class DepositConfig(StrategyConfig):
+class DepositConfig(AppConfig):
     balance_target: Decimal | None = Field(None, gt=0)
     balance_target_jitter_pct: Decimal = Field(Decimal(2), ge=0, lt=100)
     deposit_min_amount: Decimal = Field(Decimal(10), ge=0)

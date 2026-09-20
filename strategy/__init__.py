@@ -6,6 +6,7 @@
 # otherwise importing basic strategy types would also pull in runtime services.
 from .cycle import DeltaStrategy
 from .models import (
+    AppConfig,
     Order,
     OrderBook,
     OrderBookLevel,
@@ -14,6 +15,8 @@ from .models import (
     ProfileInfo,
     Side,
     StrategyConfig,
+    StrategyPoolConfig,
+    TradeConfig,
     TradingClient,
     load_config,
     opposite_side,

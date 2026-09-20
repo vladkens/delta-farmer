@@ -11,8 +11,8 @@ from lib.cli import create_cli, noop_command, run_app, setup_app
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
-from strategy import StrategyConfig
-from strategy.runner import close_all, print_positions, run_groups
+from strategy import AppConfig
+from strategy.runner import close_all, print_positions, run_strategy
 
 T = TypeVar("T")
 DD = defaultdict[str, defaultdict[str, T]]
@@ -107,7 +107,7 @@ async def print_stats(accs: list[NadoClient], period="week", filter_period="all"
 
 async def main():
     cli = await create_cli("nado", "configs/nado.toml", ["privkey"])
-    cfg = StrategyConfig.load(cli.config)
+    cfg = AppConfig.load(cli.config)
 
     all_accs, act_accs = await setup_app(cli, cfg, NadoClient.from_config)
 
@@ -119,7 +119,7 @@ async def main():
         case "close":
             await close_all(act_accs)
         case "trade":
-            await run_groups(cfg, act_accs)
+            await run_strategy(cfg, act_accs, cli.pool)
         case "positions":
             await print_positions(act_accs)
         case "deposit" | "withdraw":

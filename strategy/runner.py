@@ -17,7 +17,7 @@ from lib.errors import AppError
 from lib.logger import logger
 
 from .cycle import DeltaStrategy
-from .models import Position, StrategyConfig, TradingClient
+from .models import AppConfig, Position, TradeConfig, TradingClient
 from .symbols import ensure_exchange_symbols
 
 
@@ -159,7 +159,7 @@ async def _check_accounts(accs: Sequence[TradingClient]) -> None:
         raise AppError(f"Not registered: {', '.join(failed)}")
 
 
-async def _check_symbols(cfg: StrategyConfig, accs: Sequence[TradingClient]) -> None:
+async def _check_symbols(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
     async def symbol_exists(acc: TradingClient, symbol: str) -> bool:
         await acc.get_lot_size(symbol)
         return True
@@ -168,7 +168,7 @@ async def _check_symbols(cfg: StrategyConfig, accs: Sequence[TradingClient]) -> 
 
 
 async def _run_group(
-    cfg: StrategyConfig,
+    cfg: TradeConfig,
     name: str,
     accs: Sequence[TradingClient],
     stop_event: asyncio.Event,
@@ -181,7 +181,7 @@ async def _run_group(
         await strategy.run()  # all exceptions should be handled inside run()
 
 
-def _check_cfg(cfg: StrategyConfig, accs: Sequence[TradingClient]):
+def _check_cfg(cfg: TradeConfig, accs: Sequence[TradingClient]):
     n = len(accs)
 
     if cfg.trade_size_usd is None and cfg.trade_size_pct is None:
@@ -218,64 +218,110 @@ async def _balance_sorted(accs: Sequence[TradingClient]) -> list[TradingClient]:
     return [acc for acc, _ in pairs]
 
 
-async def run_groups(cfg: StrategyConfig, accs: Sequence[TradingClient]) -> None:
-    cfg, accs = _check_cfg(cfg, accs)
+async def _prepare_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+    _check_cfg(cfg, accs)
     await _check_accounts(accs)
     await _check_symbols(cfg, accs)
 
-    tg.start()
-    telemetry.track(
-        "trade_started",
-        {
-            "account_count": len(accs),
-            "symbols_count": len(cfg.symbols),
-            "symbols_per_trade": cfg.symbols_per_trade,
-            "trade_size_mode": "pct" if cfg.trade_size_pct is not None else "usd",
-            "market_hours": cfg.market_hours.value,
-            "use_limit": cfg.use_limit,
-            "limit_wait_retries": cfg.limit_wait_retries,
-            "limit_market_fallback": cfg.limit_market_fallback,
-            "entry_gate_enabled": cfg.max_entry_spread_pct is not None,
-            "entry_gate_wait": int(cfg.entry_gate_wait),
-            "entry_gate_poll": int(cfg.entry_gate_poll),
-            "group_mode": cfg.group_size is not None,
-            "group_enabled": cfg.group_size is not None,
-            "group_size": cfg.group_size,
-            "regroup_interval": cfg.regroup_interval is not None,
-            "regroup_enabled": cfg.regroup_interval is not None,
-            "first_as_prime": cfg.first_as_prime,
-            "max_failures_enabled": cfg.max_failures > 0,
-            "telegram_enabled": tg.enabled(),
-            "log_file_enabled": _env_enabled("DF_LOG_FILE"),
-        },
-    )
 
+def _track_trade_started(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+    props = {
+        "account_count": len(accs),
+        "symbols_count": len(cfg.symbols),
+        "symbols_per_trade": cfg.symbols_per_trade,
+        "trade_size_mode": "pct" if cfg.trade_size_pct is not None else "usd",
+        "market_hours": cfg.market_hours.value,
+        "use_limit": cfg.use_limit,
+        "limit_wait_retries": cfg.limit_wait_retries,
+        "limit_market_fallback": cfg.limit_market_fallback,
+        "entry_gate_enabled": cfg.max_entry_spread_pct is not None,
+        "entry_gate_wait": int(cfg.entry_gate_wait),
+        "entry_gate_poll": int(cfg.entry_gate_poll),
+        "group_mode": cfg.group_size is not None,
+        "group_enabled": cfg.group_size is not None,
+        "group_size": cfg.group_size,
+        "regroup_interval": cfg.regroup_interval is not None,
+        "regroup_enabled": cfg.regroup_interval is not None,
+        "first_as_prime": cfg.first_as_prime,
+        "max_failures_enabled": cfg.max_failures > 0,
+        "telegram_enabled": tg.enabled(),
+        "log_file_enabled": _env_enabled("DF_LOG_FILE"),
+    }
+    telemetry.track("trade_started", props)
+
+
+async def _run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
     if not cfg.group_size:  # Single group mode, no regrouping
         return await DeltaStrategy(cfg, accs).run()
 
     while True:
-        print("-" * 60)
-        # sort by balance only if regrouping requested - otherwise keep config order
-        accs = await _balance_sorted(accs) if cfg.regroup_interval else accs
-        grps = [list(g) for g in batched(accs, cfg.group_size)]
-        logger.info(f"Running trading with {len(grps)} groups ({len(accs)} accounts)")
-
         tasks: list[asyncio.Task] = []
         stop_event = asyncio.Event()
+        try:
+            print("-" * 60)
+            # sort by balance only if regrouping requested - otherwise keep config order
+            accs = await _balance_sorted(accs) if cfg.regroup_interval else accs
+            grps = [list(g) for g in batched(accs, cfg.group_size)]
+            logger.info(f"Running trading with {len(grps)} groups ({len(accs)} accounts)")
 
-        for i, grp_accounts in enumerate(grps):
-            stagger = i * random.uniform(10, 30)
-            name = f"{i + 1:02d}"
-            coro = _run_group(cfg, name, grp_accounts, stop_event, stagger)
-            tasks.append(asyncio.create_task(coro, name=f"delta-{name}"))
+            for i, grp_accounts in enumerate(grps):
+                stagger = i * random.uniform(10, 30)
+                name = f"{i + 1:02d}"
+                coro = _run_group(cfg, name, grp_accounts, stop_event, stagger)
+                tasks.append(asyncio.create_task(coro, name=f"delta-{name}"))
 
-        if cfg.regroup_interval is None:  # if not regrouping, just run until manually stopped
+            if cfg.regroup_interval is None:  # run until manually stopped
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return
+
+            await asyncio.sleep(cfg.regroup_interval)
+            stop_event.set()
+
+            limit_wait = cfg.limit_wait_budget if cfg.use_limit else 0
+            max_wait = limit_wait * cfg.symbols_per_trade * 2 + int(cfg.trade_duration.max) + 60
+            await utils.gather_cancel(tasks, max_wait)
+        finally:
+            stop_event.set()
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            return
 
-        await asyncio.sleep(cfg.regroup_interval)
-        stop_event.set()
 
-        limit_wait = cfg.limit_wait_budget if cfg.use_limit else 0
-        max_wait = limit_wait * cfg.symbols_per_trade * 2 + int(cfg.trade_duration.max) + 60
-        await utils.gather_cancel(tasks, max_wait)
+async def run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+    """Run one strategy, preserving the legacy runner API."""
+    await _prepare_groups(cfg, accs)
+    tg.start()
+    _track_trade_started(cfg, accs)
+    await _run_groups(cfg, accs)
+
+
+def select_strategy[T: TradingClient](
+    cfg: AppConfig, accs: Sequence[T], pool_name: str | None
+) -> tuple[TradeConfig, list[T]]:
+    """Resolve the one strategy selected for this process."""
+    if not cfg.pools:
+        if pool_name is not None:
+            raise AppError("This config has no named pools")
+        assert cfg.strategy is not None
+        return cfg.strategy, list(accs)
+
+    available = ", ".join(cfg.pools)
+    if pool_name is None:
+        raise AppError(f"Select a pool: {available}")
+
+    pool = cfg.pools.get(pool_name)
+    if pool is None:
+        raise AppError(f"Unknown pool '{pool_name}'. Available: {available}")
+
+    clients = {account.name: account for account in accs}
+    pool_accs = [clients[name] for name in pool.accounts if name in clients]
+    return pool, pool_accs
+
+
+async def run_strategy(
+    cfg: AppConfig, accs: Sequence[TradingClient], pool_name: str | None
+) -> None:
+    """Resolve and run one legacy strategy or named pool."""
+    strategy, strategy_accs = select_strategy(cfg, accs, pool_name)
+    await run_groups(strategy, strategy_accs)

@@ -17,7 +17,7 @@ from .models import (
     OrderBookLevel,
     OrderStatus,
     Side,
-    StrategyConfig,
+    TradeConfig,
     TradingClient,
 )
 
@@ -103,7 +103,7 @@ def evaluate_entry_quality(
 
 
 async def wait_for_entry_quality(
-    client: TradingClient, symbol: str, legs: Sequence[tuple[Side, Decimal]], cfg: StrategyConfig
+    client: TradingClient, symbol: str, legs: Sequence[tuple[Side, Decimal]], cfg: TradeConfig
 ) -> EntryQuality | None:
     if cfg.max_entry_spread_pct is None:
         return EntryQuality(None, None, None)

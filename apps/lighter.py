@@ -10,7 +10,7 @@ from lib.table import AutoTable, Column
 from lib.utils import gather_accs, short_addr
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
-from strategy.runner import close_all, print_positions, run_groups
+from strategy.runner import close_all, print_positions, run_groups, select_strategy
 from strategy.withdrawal import run_withdrawals
 
 
@@ -107,8 +107,9 @@ async def main():
                 await require_login(act_accs)
                 await close_all(act_accs)
             case "trade":
-                await require_login(act_accs)
-                await run_groups(cfg, act_accs)
+                strategy, accounts = select_strategy(cfg, act_accs, cli.pool)
+                await require_login(accounts)
+                await run_groups(strategy, accounts)
             case "positions":
                 await print_positions(act_accs)
             case "deposit":

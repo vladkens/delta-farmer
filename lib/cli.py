@@ -317,7 +317,8 @@ async def create_cli(
     cli = CliParser(prog=name, formatter_class=HelpFormatter)
 
     sub = cli.add_subparsers(dest="command")
-    sub.add_parser("trade", help="Run trading manager")
+    trade_parser = sub.add_parser("trade", help="Run trading manager")
+    trade_parser.add_argument("pool", nargs="?", metavar="POOL", help="Named account pool")
     sub.add_parser("close", help="Close all positions")
     sub.add_parser("positions", help="Show active positions")
     sub.add_parser("info", help="Show accounts info")

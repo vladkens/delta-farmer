@@ -574,7 +574,10 @@ class LighterClient:
         return price_step / multiplier
 
     async def get_min_trade_usd(self, symbol: str) -> Decimal:
-        return Decimal((await self._market(symbol))["min_quote_amount"])
+        market = await self._market(symbol)
+        min_quote = Decimal(str(market["min_quote_amount"]))
+        min_base = Decimal(str(market["min_base_amount"]))
+        return max(min_quote, min_base * await self.get_price(symbol))
 
     # MARK: Account
 

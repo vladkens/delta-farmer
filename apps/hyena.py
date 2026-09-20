@@ -14,8 +14,8 @@ from lib.cli import create_cli, noop_command, print_deprecation_notice, run_app,
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr
-from strategy import StrategyConfig
-from strategy.runner import close_all, print_positions, run_groups
+from strategy import AppConfig
+from strategy.runner import close_all, print_positions, run_strategy
 
 T = TypeVar("T")
 DD = defaultdict[str, defaultdict[str, T]]
@@ -190,8 +190,11 @@ async def main():
             "migrate": lambda _: None,
         },
     )
-    cfg = StrategyConfig.load(cli.config)
-    cfg.symbols = _normalize_symbols(cfg.symbols)
+    cfg = AppConfig.load(cli.config)
+    strategies = list(cfg.pools.values()) if cfg.pools else [cfg.strategy]
+    for strategy in strategies:
+        assert strategy is not None
+        strategy.symbols = _normalize_symbols(strategy.symbols)
 
     all_accs, act_accs = await setup_app(cli, cfg, HyenaClient.from_config)
     print_deprecation_notice(
@@ -212,7 +215,7 @@ async def main():
         case "migrate":
             await migrate_hyperliquid_accounts(all_accs, "Hyena")
         case "trade":
-            await run_groups(cfg, act_accs)
+            await run_strategy(cfg, act_accs, cli.pool)
         case "deposit" | "withdraw":
             noop_command("Hyena", cli.command)
 

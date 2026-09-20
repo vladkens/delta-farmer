@@ -19,7 +19,7 @@ from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import confirm, gather_accs, parse_filter, short_addr, to_period_day
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
-from strategy.runner import close_all, print_positions, run_groups
+from strategy.runner import close_all, print_positions, run_strategy
 from strategy.withdrawal import run_withdrawals
 
 
@@ -318,7 +318,7 @@ async def main():
         case "close":
             await close_all(act_accs)
         case "trade":
-            await run_groups(cfg, act_accs)
+            await run_strategy(cfg, act_accs, cli.pool)
         case "positions":
             await print_positions(act_accs)
         case "competition":

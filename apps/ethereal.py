@@ -11,8 +11,8 @@ from lib.logger import logger
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
 from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
-from strategy import StrategyConfig
-from strategy.runner import close_all, print_positions, run_groups
+from strategy import AppConfig
+from strategy.runner import close_all, print_positions, run_strategy
 
 # MARK: Storages
 
@@ -169,7 +169,7 @@ async def main():
         ["privkey"],
         custom_commands={"claim": lambda _: None},
     )
-    cfg = StrategyConfig.load(cli.config)
+    cfg = AppConfig.load(cli.config)
 
     all_accs, act_accs = await setup_app(cli, cfg, EtherealClient.from_config)
     print_deprecation_notice("Ethereal closed; removed next release. https://app.ethereal.trade/")
@@ -183,7 +183,7 @@ async def main():
         case "close":
             await close_all(act_accs)
         case "trade":
-            await run_groups(cfg, act_accs)
+            await run_strategy(cfg, act_accs, cli.pool)
         case "positions":
             await print_positions(act_accs)
         case "claim":
