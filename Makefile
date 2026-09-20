@@ -63,20 +63,19 @@ login:
 
 # --- Deploy ---
 
-.PHONY: deploy deploy-gw
+.PHONY: deploy ssh
 
 HOST=lab
-EXEC=ssh -tt $(HOST)
-SYNC=rsync -avz --delete-after \
-	--exclude={'.git','docs/'} \
-	--include='/configs/***' \
-	--filter=':- .gitignore'
+EXEC=ssh $(HOST)
 DDIR=~/delta-farmer
 UV=~/.local/bin/uv
 
 deploy:
-	$(SYNC) ./ $(HOST):$(DDIR)
+	$(EXEC) 'test -d $(DDIR)/.git || git init -q -b main $(DDIR); git -C $(DDIR) config receive.denyCurrentBranch updateInstead'
+	git push $(HOST):delta-farmer HEAD:refs/heads/main
+	rsync -az --delete configs/ $(HOST):$(DDIR)/configs/
+	$(EXEC) "touch $(DDIR)/.env && chmod 600 $(DDIR)/.env"
 	$(EXEC) "cd $(DDIR) && $(UV) sync --locked"
 
-deploy-gw:
-	cd _gateway && fly deploy --ha=false
+ssh:
+	ssh -t $(HOST) 'cd $(DDIR) && exec tmux start-server \; set-option -g mouse on \; set-option -g base-index 1 \; set-option -g renumber-windows on \; new-session -A -s df'

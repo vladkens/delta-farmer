@@ -113,7 +113,7 @@ async def main():
                 await print_positions(act_accs)
             case "deposit":
                 accounts = _select_account(all_accs, act_accs, cli.account)
-                await require_login(accounts)
+                # The first deposit registers the Lighter account; login is only possible afterward.
                 await run_deposits(accounts, cfg)
             case "withdraw":
                 accounts = _select_account(all_accs, act_accs, cli.account)
