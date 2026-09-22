@@ -8,6 +8,7 @@ from curl_cffi import CurlError
 from apps import lighter as lighter_app
 from apps.lighter import apply_referral_code, print_info
 from clients.lighter import LighterClient
+from lib.http import ApiError
 from lib.models import DurationSec, TimeRange
 from strategy import ProfileInfo
 
@@ -53,6 +54,16 @@ async def test_volume_reconnects_after_connection_failure(monkeypatch):
     ws.send_json.assert_awaited_once_with(
         {"type": "subscribe", "channel": "account_all_trades/42", "auth": "token"}
     )
+
+
+async def test_points_api_failure_returns_zero():
+    client = object.__new__(LighterClient)
+    client.name = "test"
+    client.address = "0xabc"
+    client._get_auth_headers = Mock(return_value={"Authorization": "token"})
+    client._call = AsyncMock(side_effect=ApiError("Leaderboard unavailable"))
+
+    assert await client._get_points(42) == Decimal(0)
 
 
 async def test_apply_referral_code_waits_between_accounts(monkeypatch):

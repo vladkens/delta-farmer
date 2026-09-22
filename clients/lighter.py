@@ -216,12 +216,12 @@ class LighterClient:
         try:
             res = rep.json()
         except ValueError:
-            raise ApiError("Lighter API error", rep)
+            raise ApiError(f"Lighter API {method} {path} error", rep)
 
         if "code" in res and res["code"] != 200:
             raise LighterApiError(rep, res)
         if not rep.ok:
-            raise ApiError("Lighter API error", rep)
+            raise ApiError(f"Lighter API {method} {path} error", rep)
 
         return res
 
@@ -290,14 +290,23 @@ class LighterClient:
         return res.get("used_code") or None
 
     async def _get_points(self, account_index: int) -> Decimal:
-        hdr = self._get_auth_headers(account_index)
-        res = await self._call(
-            "GET",
-            "/api/v1/livePoints/total",
-            params={"account_index": account_index},
-            headers=hdr,
-        )
-        return Decimal(str(res["total_live_points"]))
+        try:
+            auth = self._get_auth_headers(account_index)["Authorization"]
+            res = await self._call(
+                "GET",
+                "/api/v1/leaderboard",
+                params={"type": "all", "l1_address": self.address, "auth": auth},
+                headers={"PreferAuthServer": "true"},
+            )
+            for entry in res["entries"]:
+                if entry["l1_address"].lower() == self.address.lower():
+                    return Decimal(str(entry["points"]))
+        except Exception as error:
+            logger.warning(f"Leaderboard points unavailable: {error}")
+            return Decimal(0)
+
+        logger.warning("No leaderboard points for account")
+        return Decimal(0)
 
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
