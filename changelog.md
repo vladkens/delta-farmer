@@ -1,3 +1,17 @@
+## v0.10.1 – 2026-09-26
+
+### Fixes
+
+- Fixed Lighter points reporting to use leaderboard totals.
+
+### Other
+
+- Added a standalone script to check and claim the Big Short airdrop on BSC, with optional swaps from SHORT to USDT or BNB.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.10.0...v0.10.1
+
+---
+
 ## v0.10.0 – 2026-09-20
 
 ### Features
