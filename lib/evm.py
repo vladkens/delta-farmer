@@ -2,7 +2,7 @@
 # Copyright (c) vladkens | MIT License
 import asyncio
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
@@ -530,6 +530,10 @@ _RELAY_OUT = ("details", "currencyOut")
 _RELAY_GAS = ("fees", "gas", "minimumAmount")
 
 
+class RelayLossError(ApiError):
+    """A valid quote exceeds the automatic loss limit."""
+
+
 class RelayQuote(BaseModel):
     input_amount: int = Field(validation_alias=AliasPath(*_RELAY_IN, "amount"))
     output_amount: int = Field(validation_alias=AliasPath(*_RELAY_OUT, "amount"))
@@ -542,6 +546,24 @@ class RelayQuote(BaseModel):
     quoted_gas: str | int | None = Field(None, validation_alias=AliasPath(*_RELAY_GAS))
     time_estimate: int = Field(0, validation_alias=AliasPath("details", "timeEstimate"), ge=0)
     steps: list[RelayStep]
+
+    @property
+    def minimum_output_usd(self) -> Decimal:
+        if self.output_usd is None or self.output_amount <= 0:
+            raise ApiError("Relay quote has no valid output value")
+        return self.output_usd * self.minimum_output_amount / self.output_amount
+
+    @property
+    def loss_usd(self) -> Decimal:
+        if self.input_usd is None:
+            raise ApiError("Relay quote has no USD value")
+        return self.input_usd - self.minimum_output_usd - self.gas_topup_usd
+
+    @property
+    def loss_limit_usd(self) -> Decimal:
+        if self.input_usd is None:
+            raise ApiError("Relay quote has no USD value")
+        return max(RELAY_MAX_LOSS_USD, self.input_usd * RELAY_MAX_LOSS_PCT / 100)
 
     @property
     def required_gas(self) -> int:
@@ -557,13 +579,13 @@ class RelayQuote(BaseModel):
 async def _get_relay_quote(
     http: AsyncHttp,
     owner: str,
-    source: str,
-    target: str,
+    origin_network: EvmNetwork,
+    origin_token: EvmToken,
+    destination_network: EvmNetwork,
+    destination_token: EvmToken,
     amount: int,
     topup_gas: bool = False,
 ) -> RelayQuote:
-    origin_network, origin_token = resolve_evm_asset(source)
-    destination_network, destination_token = resolve_evm_asset(target)
     pld = {
         "user": owner,
         "recipient": owner,
@@ -661,6 +683,67 @@ async def relay_move(
 ) -> RelayQuote:
     origin_network, origin_token = resolve_evm_asset(source)
     destination_network, destination_token = resolve_evm_asset(target)
+    quote = await _relay_execute(
+        account,
+        origin_network,
+        origin_token,
+        destination_network,
+        destination_token,
+        quantity,
+        proxy,
+        minimum_usd,
+        topup_gas,
+    )
+    assert quote is not None
+    return quote
+
+
+async def relay_swap(
+    account: LocalAccount,
+    network: EvmNetwork,
+    origin_token: EvmToken,
+    destination_token: EvmToken,
+    quantity: str,
+    proxy: str | None = None,
+    minimum_usd: Decimal = Decimal(0),
+    topup_gas: bool = False,
+    *,
+    review_quote: Callable[[RelayQuote], bool] | None = None,
+) -> RelayQuote | None:
+    """Swap one token for another on the same EVM network via relay.link.
+
+    Lets a token that isn't registered in EVM_NETWORKS[...].stables (e.g. one
+    only known at runtime, like a claimed airdrop token) be swapped.
+    """
+    return await _relay_execute(
+        account,
+        network,
+        origin_token,
+        network,
+        destination_token,
+        quantity,
+        proxy,
+        minimum_usd,
+        topup_gas,
+        review_quote=review_quote,
+    )
+
+
+async def _relay_execute(
+    account: LocalAccount,
+    origin_network: EvmNetwork,
+    origin_token: EvmToken,
+    destination_network: EvmNetwork,
+    destination_token: EvmToken,
+    quantity: str,
+    proxy: str | None = None,
+    minimum_usd: Decimal = Decimal(0),
+    topup_gas: bool = False,
+    *,
+    review_quote: Callable[[RelayQuote], bool] | None = None,
+) -> RelayQuote | None:
+    source = origin_network.asset_code(origin_token)
+    target = destination_network.asset_code(destination_token)
     if (destination_network, destination_token) == (origin_network, origin_token):
         raise ValueError("EVM source and destination are the same")
 
@@ -683,14 +766,32 @@ async def relay_move(
         if amount <= 0 or amount > balance:
             raise ValueError(f"Insufficient {source} balance")
 
-        quote = await _get_relay_quote(http, account.address, source, target, amount, topup_gas)
+        quote = await _get_relay_quote(
+            http,
+            account.address,
+            origin_network,
+            origin_token,
+            destination_network,
+            destination_token,
+            amount,
+            topup_gas,
+        )
         required_gas = quote.required_gas
         if quantity == "max" and origin_token.address.lower() == ZERO_ADDRESS:
             amount = native_balance - required_gas
             if amount <= 0:
                 raise ValueError(f"Insufficient {source} balance for gas")
 
-            quote = await _get_relay_quote(http, account.address, source, target, amount, topup_gas)
+            quote = await _get_relay_quote(
+                http,
+                account.address,
+                origin_network,
+                origin_token,
+                destination_network,
+                destination_token,
+                amount,
+                topup_gas,
+            )
             required_gas = quote.required_gas
 
         spent = quote.input_amount if origin_token.address.lower() == ZERO_ADDRESS else 0
@@ -700,11 +801,18 @@ async def relay_move(
         if topup_gas and quote.gas_topup_usd <= 0:
             raise ApiError("Relay route does not provide the requested gas top-up")
 
-        validate_relay_quote(quote, minimum_usd)
+        try:
+            validate_relay_quote(quote, minimum_usd)
+        except RelayLossError:
+            if review_quote is None:
+                raise
         if origin_network != destination_network and not any(
             item.check for step in quote.steps for item in step.items
         ):
             raise ApiError("Relay quote has no destination confirmation")
+
+        if review_quote is not None and not review_quote(quote):
+            return None
 
         for step in quote.steps:
             await _execute_relay_step(http, rpc, origin_network, account, step)
@@ -733,18 +841,19 @@ def validate_relay_quote(quote: RelayQuote, minimum_usd: Decimal = Decimal(0)) -
         raise ApiError("Relay quote has no valid output amount")
     if quote.input_usd is None or quote.output_usd is None:
         raise ApiError("Relay quote has no USD value")
+    if quote.input_usd <= 0 or quote.output_usd <= 0:
+        raise ApiError("Relay quote has no valid USD value")
     if quote.input_usd < minimum_usd:
         raise ApiError(f"Relay route is uneconomical: ${quote.input_usd:,.2f}")
     if quote.time_estimate > RELAY_MAX_TIME_SEC:
         raise ApiError(f"Relay route is too slow: {quote.time_estimate}s")
 
-    minimum_output_usd = (
-        quote.output_usd * Decimal(quote.minimum_output_amount) / Decimal(quote.output_amount)
-    )
-    loss = quote.input_usd - minimum_output_usd - quote.gas_topup_usd
-    allowed = max(RELAY_MAX_LOSS_USD, quote.input_usd * RELAY_MAX_LOSS_PCT / 100)
-    if loss > allowed:
-        raise ApiError(f"Relay route loss is too high: ${loss:,.2f}")
+    if quote.loss_usd > quote.loss_limit_usd:
+        loss_pct = quote.loss_usd / quote.input_usd * 100
+        raise RelayLossError(
+            f"Relay route loss is too high: ${quote.loss_usd:,.2f} ({loss_pct:.2f}%; "
+            f"limit ${quote.loss_limit_usd:,.2f})"
+        )
 
 
 async def transfer_evm_asset(
