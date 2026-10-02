@@ -131,6 +131,15 @@ HYPEREVM = EvmNetwork(
         "USDT": EvmToken("USDT", "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb", 6),
     },
 )
+ETHEREAL = EvmNetwork(
+    name="ethereal",
+    chain_id=5_064_014,
+    rpc_url="https://rpc.ethereal.trade",
+    explorer_url="https://explorer.ethereal.trade",
+    native_token=EvmToken("USDe", ZERO_ADDRESS, 18),
+    short_name="ETHE",
+    stables={},
+)
 
 EVM_NETWORKS = {
     network.code: network
@@ -142,6 +151,7 @@ EVM_NETWORKS = {
         ARBITRUM,
         ROBINHOOD,
         HYPEREVM,
+        ETHEREAL,
     )
 }
 
@@ -159,7 +169,7 @@ def resolve_evm_asset(value: str) -> tuple[EvmNetwork, EvmToken]:
     symbol = symbol.upper()
     token = (
         network.native_token
-        if symbol == network.native_token.symbol
+        if symbol == network.native_token.symbol.upper()
         else network.stables.get(symbol)
     )
     if token is None:
@@ -308,6 +318,33 @@ async def get_evm_balances(
         balances[token] = Decimal(value).scaleb(-token.decimals)
 
     return balances
+
+
+async def get_usdc_destination(owner: str, proxy: str | None = None) -> EvmNetwork:
+    networks = [network for network in EVM_NETWORKS.values() if "USDC" in network.stables]
+    results = await asyncio.gather(
+        *(
+            get_evm_balances(network, owner, tuple(network.stables.values()), proxy)
+            for network in networks
+        ),
+        return_exceptions=True,
+    )
+    balances: list[tuple[EvmNetwork, Decimal]] = []
+    for network, result in zip(networks, results, strict=True):
+        if isinstance(result, BaseException):
+            if not isinstance(result, Exception):
+                raise result
+            logger.warning(f"{network.name.title()} balances unavailable: {result}")
+            continue
+
+        balances.append((network, sum(result.values(), Decimal(0))))
+
+    if not balances:
+        raise ApiError("No destination balances available for the USDC bridge")
+
+    # Prefer Arbitrum when balances are equal, including an empty wallet.
+    network, _balance = max(balances, key=lambda row: (row[1], row[0] == ARBITRUM))
+    return network
 
 
 async def dynamic_fee_params(rpc: RPC) -> dict:
@@ -487,6 +524,7 @@ RELAY_STATUS_TIMEOUT_SEC = 15 * 60
 RELAY_STATUS_POLL_DELAY_SEC = 3
 RELAY_NONCE_SYNC_TIMEOUT_SEC = 30
 RELAY_GAS_BUFFER_PCT = 30
+RELAY_NATIVE_GAS_BUFFER_PCT = 200  # Covers the doubled fee cap and padded gas limit.
 RELAY_SLIPPAGE_BPS = 50
 RELAY_SDK_VERSION = "8.0.1"
 RELAY_MAX_TIME_SEC = 10 * 60
@@ -546,6 +584,7 @@ class RelayQuote(BaseModel):
     quoted_gas: str | int | None = Field(None, validation_alias=AliasPath(*_RELAY_GAS))
     time_estimate: int = Field(0, validation_alias=AliasPath("details", "timeEstimate"), ge=0)
     steps: list[RelayStep]
+    gas_buffer_pct: int = Field(RELAY_GAS_BUFFER_PCT, exclude=True, ge=0)
 
     @property
     def minimum_output_usd(self) -> Decimal:
@@ -573,7 +612,7 @@ class RelayQuote(BaseModel):
         estimate = max(quoted, calculated)
         if estimate <= 0:
             raise ApiError("Relay quote has no gas estimate")
-        return (estimate * (100 + RELAY_GAS_BUFFER_PCT) + 99) // 100
+        return (estimate * (100 + self.gas_buffer_pct) + 99) // 100
 
 
 async def _get_relay_quote(
@@ -680,7 +719,9 @@ async def relay_move(
     proxy: str | None = None,
     minimum_usd: Decimal = Decimal(0),
     topup_gas: bool = False,
-) -> RelayQuote:
+    *,
+    review_quote: Callable[[RelayQuote], bool] | None = None,
+) -> RelayQuote | None:
     origin_network, origin_token = resolve_evm_asset(source)
     destination_network, destination_token = resolve_evm_asset(target)
     quote = await _relay_execute(
@@ -693,8 +734,8 @@ async def relay_move(
         proxy,
         minimum_usd,
         topup_gas,
+        review_quote=review_quote,
     )
-    assert quote is not None
     return quote
 
 
@@ -776,6 +817,8 @@ async def _relay_execute(
             amount,
             topup_gas,
         )
+        if origin_token.address.lower() == ZERO_ADDRESS:
+            quote.gas_buffer_pct = RELAY_NATIVE_GAS_BUFFER_PCT
         required_gas = quote.required_gas
         if quantity == "max" and origin_token.address.lower() == ZERO_ADDRESS:
             amount = native_balance - required_gas
@@ -792,6 +835,7 @@ async def _relay_execute(
                 amount,
                 topup_gas,
             )
+            quote.gas_buffer_pct = RELAY_NATIVE_GAS_BUFFER_PCT
             required_gas = quote.required_gas
 
         spent = quote.input_amount if origin_token.address.lower() == ZERO_ADDRESS else 0

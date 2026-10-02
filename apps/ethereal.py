@@ -3,14 +3,23 @@
 import asyncio
 from collections import defaultdict
 from decimal import Decimal
+from functools import partial
 
-from clients.ethereal import EtherealClient, EtherealPoint, EtherealPosition, EtherealReward
+from clients.ethereal import (
+    REWARD_BRIDGE_DUST,
+    EtherealClient,
+    EtherealPoint,
+    EtherealPosition,
+    EtherealReward,
+    EtherealRewardBalances,
+)
 from lib.cli import create_cli, noop_command, print_deprecation_notice, run_app, setup_app
 from lib.errors import AppError
+from lib.evm import ETHEREAL, RelayQuote, resolve_evm_asset
 from lib.logger import logger
 from lib.store import DataStore
 from lib.table import AutoTable, Column, PeriodRow, render_stats
-from lib.utils import gather_accs, parse_filter, short_addr, to_period_day
+from lib.utils import confirm, gather_accs, parse_filter, short_addr, to_period_day
 from strategy import AppConfig
 from strategy.runner import close_all, print_positions, run_strategy
 
@@ -104,7 +113,13 @@ async def load_rewards(
     accs: list[EtherealClient], claimable_only: bool = False
 ) -> list[tuple[EtherealClient, list[EtherealReward]]]:
     rewards = await gather_accs(accs, lambda acc: acc.rewards(claimable_only))
-    return [(acc, items) for acc, items in zip(accs, rewards) if items]
+    rows = []
+    for acc, items in zip(accs, rewards, strict=True):
+        if claimable_only:
+            items = [reward for reward in items if reward.claimable > 0]
+        if items:
+            rows.append((acc, items))
+    return rows
 
 
 def reward_totals(
@@ -130,33 +145,102 @@ async def print_reward_notice(accs: list[EtherealClient]) -> None:
         rows = await load_rewards(accs, claimable_only=True)
     except AppError as error:
         logger.warning(f"Ethereal rewards unavailable: {error}")
-        return
+        rows = []
 
     totals = reward_totals(rows, "claimable")
-    if not totals:
+    if totals:
+        accounts = ", ".join(acc.name for acc, _rewards in rows)
+        print(
+            f"* Claimable Ethereal rewards: {format_rewards(totals)} ({accounts}). "
+            "Run `uv run apps/ethereal.py claim`."
+        )
+
+    try:
+        balances = await load_reward_balances(accs)
+    except AppError as error:
+        logger.warning(f"Ethereal reward balances unavailable: {error}")
         return
 
-    accounts = ", ".join(acc.name for acc, _rewards in rows)
-    print(
-        f"* Claimable Ethereal rewards: {format_rewards(totals)} ({accounts}). "
-        "Run `uv run apps/ethereal.py claim`."
-    )
+    for field, symbol, action in (("wrapped", "WUSDe", "unwrap"), ("native", "USDe", "bridge")):
+        items = [(acc, getattr(balance, field)) for acc, balance in balances]
+        items = [(acc, amount) for acc, amount in items if amount > REWARD_BRIDGE_DUST]
+        if items:
+            amount = sum((amount for _acc, amount in items), Decimal(0))
+            accounts = ", ".join(acc.name for acc, _amount in items)
+            print(
+                f"* Ethereal {action}: {format_rewards({symbol: amount})} ({accounts}). "
+                "Run `uv run apps/ethereal.py claim` to continue recovery."
+            )
+
+
+async def load_reward_balances(
+    accs: list[EtherealClient],
+) -> list[tuple[EtherealClient, EtherealRewardBalances]]:
+    balances = await gather_accs(accs, lambda acc: acc.reward_balances())
+    return list(zip(accs, balances, strict=True))
+
+
+def review_bridge_quote(name: str, target: str, quote: RelayQuote) -> bool:
+    network, token = resolve_evm_asset(target)
+    amount = Decimal(quote.input_amount).scaleb(-ETHEREAL.native_token.decimals)
+    received = Decimal(quote.output_amount).scaleb(-token.decimals)
+    minimum = Decimal(quote.minimum_output_amount).scaleb(-token.decimals)
+    gas = Decimal(quote.required_gas).scaleb(-ETHEREAL.native_token.decimals)
+    print(f"{name}: bridge {amount:,.6f} USDe → {network.name.title()} {token.symbol}")
+    print(f"Receive: {received:,.6f} {token.symbol}; minimum: {minimum:,.6f}")
+    print(f"Estimated loss at minimum output: ${quote.loss_usd:,.4f}; gas budget: {gas:.8f} USDe")
+    if quote.loss_usd > quote.loss_limit_usd:
+        return confirm("Loss exceeds the automatic limit. Execute this bridge anyway?")
+    return confirm("Execute this bridge?")
 
 
 async def claim_rewards(accs: list[EtherealClient]) -> None:
-    rows = await load_rewards(accs, claimable_only=True)
-    if not rows:
-        print("No claimable Ethereal rewards.")
-        return
+    try:
+        rows = await load_rewards(accs, claimable_only=True)
+    except AppError as error:
+        logger.warning(f"Ethereal rewards unavailable: {error}")
+        rows = []
+
+    balances = await load_reward_balances(accs)
 
     for acc, rewards in rows:
         acc.reward_claim_call(rewards)
 
-    totals = reward_totals(rows, "claimable")
-    for acc, rewards in rows:
-        await acc.claim_rewards(rewards)
+    if rows:
+        totals = reward_totals(rows, "claimable")
+        accounts = ", ".join(acc.name for acc, _rewards in rows)
+        print(f"Claimable: {format_rewards(totals)} ({accounts}).")
+        if not confirm("Claim these Ethereal rewards?"):
+            return
 
-    print(f"Claimed Ethereal rewards: {format_rewards(totals)}.")
+        for acc, rewards in rows:
+            await acc.claim_rewards(rewards)
+
+        print(f"Claimed Ethereal rewards: {format_rewards(totals)}.")
+        balances = await load_reward_balances(accs)
+
+    wrapped = [(acc, balance.wrapped) for acc, balance in balances if balance.wrapped > 0]
+    if wrapped:
+        amount = sum((amount for _acc, amount in wrapped), Decimal(0))
+        accounts = ", ".join(acc.name for acc, _amount in wrapped)
+        print(f"Unwrap: {format_rewards({'WUSDe': amount})} ({accounts}).")
+        if not confirm("Unwrap these rewards to USDe?"):
+            return
+
+        for acc, amount in wrapped:
+            await acc.unwrap_rewards(amount)
+
+        balances = await load_reward_balances(accs)
+
+    bridge = [acc for acc, balance in balances if balance.native > REWARD_BRIDGE_DUST]
+    targets = await gather_accs(bridge, lambda acc: acc.reward_destination())
+    for acc, target in zip(bridge, targets, strict=True):
+        result = await acc.bridge_rewards(target, partial(review_bridge_quote, acc.name, target))
+        if result is None:
+            print(f"{acc.name}: bridge cancelled.")
+
+    if not rows and not wrapped and not bridge:
+        print("No Ethereal rewards or wallet balances to recover.")
 
 
 # MARK: Main

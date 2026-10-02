@@ -2,6 +2,8 @@
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
 import asyncio
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, Self
@@ -11,7 +13,23 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lib import utils
 from lib.decorators import bind_log_context, retry, ttl_cache
-from lib.evm import RPC, check_chain, make_call, send_contract, wait_receipt
+from lib.evm import (
+    ETHEREAL,
+    RPC,
+    ZERO_ADDRESS,
+    EvmToken,
+    RelayQuote,
+    check_chain,
+    check_token_balance,
+    get_evm_balances,
+    get_usdc_destination,
+    make_call,
+    relay_move,
+    send_contract,
+    to_addr,
+    to_token_units,
+    wait_receipt,
+)
 from lib.http import ApiError, AsyncHttp, HttpMethod
 from lib.logger import logger
 from lib.models import AccountConfig
@@ -21,11 +39,12 @@ API_URL = "https://api.ethereal.trade/v1"
 APP_URL = "https://app.ethereal.trade"
 ARCHIVE_URL = "https://archive.ethereal.trade/v1"
 MERKL_API_URL = "https://api.merkl.xyz/v4"
-ETHEREAL_RPC_URL = "https://rpc.ethereal.trade"
-ETHEREAL_EXPLORER_URL = "https://explorer.ethereal.trade"
-ETHEREAL_CHAIN_ID = 5_064_014
+ETHEREAL_RPC_URL = ETHEREAL.rpc_url
+ETHEREAL_EXPLORER_URL = ETHEREAL.explorer_url
+ETHEREAL_CHAIN_ID = ETHEREAL.chain_id
 MERKL_DISTRIBUTOR = "0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae"
 REWARD_RECEIPT_TIMEOUT_SEC = 3 * 60
+REWARD_BRIDGE_DUST = Decimal("0.000001")
 _POINTS_GENESIS = datetime(2025, 12, 18, tzinfo=UTC)
 
 NativeSide = Literal["buy", "sell"]
@@ -136,6 +155,12 @@ class EtherealReward(BaseModel):
         return self.to_amount(self.pending)
 
 
+@dataclass(frozen=True)
+class EtherealRewardBalances:
+    wrapped: Decimal
+    native: Decimal
+
+
 # MARK: Client
 
 
@@ -159,6 +184,7 @@ class EtherealClient:
         self.name = name
         self.account = utils.parse_eth_key(privkey, name)
         self.address = self.account.address
+        self.proxy = proxy
         self.http = AsyncHttp(
             baseurl=API_URL,
             headers={"Origin": APP_URL, "Referer": f"{APP_URL}/"},
@@ -492,6 +518,34 @@ class EtherealClient:
             for reward in group.get("rewards", [])
         ]
 
+    @ttl_cache(3600)
+    async def reward_token(self) -> EvmToken:
+        res = await self._call("GET", "/token")
+        for token in res.get("data", []):
+            if token["name"] != "USD":
+                continue
+            if token.get("erc20Symbol") != "WUSDe" or token.get("erc20Decimals") != 18:
+                raise ApiError("Unexpected Ethereal USD token metadata")
+
+            address = to_addr(token["address"])
+            if address == ZERO_ADDRESS:
+                raise ApiError("Ethereal WUSDe token address is missing")
+
+            return EvmToken("WUSDe", address, token["erc20Decimals"])
+
+        raise ApiError("Ethereal WUSDe token not found")
+
+    async def reward_balances(self) -> EtherealRewardBalances:
+        wrapped = await self.reward_token()
+        balances = await get_evm_balances(
+            ETHEREAL, self.address, (wrapped, ETHEREAL.native_token), self.proxy
+        )
+        return EtherealRewardBalances(balances[wrapped], balances[ETHEREAL.native_token])
+
+    async def reward_destination(self) -> str:
+        network = await get_usdc_destination(self.address, self.proxy)
+        return network.asset_code(network.stables["USDC"])
+
     def reward_claim_call(self, rewards: list[EtherealReward]) -> dict:
         if not rewards:
             raise ValueError("No claimable Ethereal rewards")
@@ -531,7 +585,7 @@ class EtherealClient:
 
     async def claim_rewards(self, rewards: list[EtherealReward]) -> str:
         call = self.reward_claim_call(rewards)
-        async with RPC(ETHEREAL_RPC_URL, "ethereal") as rpc:
+        async with RPC(ETHEREAL_RPC_URL, "ethereal", self.proxy) as rpc:
             await check_chain(rpc, ETHEREAL_CHAIN_ID)
             tx_hash, fee = await send_contract(rpc, self.account, call)
             url = f"{ETHEREAL_EXPLORER_URL}/tx/{tx_hash}"
@@ -540,6 +594,33 @@ class EtherealClient:
 
         logger.success(f"Rewards claimed: {url}")
         return tx_hash
+
+    async def unwrap_rewards(self, amount: Decimal) -> str:
+        token = await self.reward_token()
+        units = to_token_units(amount, token)
+        call = make_call(token.address, "withdraw", ["uint256"], [units])
+        async with RPC(ETHEREAL_RPC_URL, "ethereal", self.proxy) as rpc:
+            await check_chain(rpc, ETHEREAL_CHAIN_ID)
+            await check_token_balance(rpc, token, self.address, units)
+            tx_hash, fee = await send_contract(rpc, self.account, call)
+            url = ETHEREAL.tx_url(tx_hash)
+            logger.info(f"Unwrap submitted: fee {fee:,.8f} USDe; {url}")
+            await wait_receipt(rpc, tx_hash, REWARD_RECEIPT_TIMEOUT_SEC)
+
+        logger.success(f"Unwrapped {amount:,.6f} WUSDe: {url}")
+        return tx_hash
+
+    async def bridge_rewards(
+        self, target: str, review_quote: Callable[[RelayQuote], bool]
+    ) -> RelayQuote | None:
+        return await relay_move(
+            self.account,
+            ETHEREAL.asset_code(ETHEREAL.native_token),
+            target,
+            "max",
+            self.proxy,
+            review_quote=review_quote,
+        )
 
     async def _total_volume(self) -> Decimal:
         sub = await self.subaccount()
