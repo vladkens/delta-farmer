@@ -2,15 +2,17 @@
 # Copyright (c) vladkens | MIT License | Built by humans, blamed on AI
 import argparse
 import asyncio
+from collections import defaultdict
 from decimal import Decimal
 
-from clients.lighter import LighterClient
+from clients.lighter import LighterClient, LighterFunding, LighterTrade
 from lib.cli import create_cli, run_app, setup_app
 from lib.errors import AppError
 from lib.logger import logger
 from lib.models import TimeRange
-from lib.table import AutoTable, Column
-from lib.utils import format_duration, gather_accs, short_addr
+from lib.store import DataStore
+from lib.table import AutoTable, Column, PeriodRow, render_stats
+from lib.utils import format_duration, gather_accs, parse_filter, short_addr, to_period_day
 from strategy import load_config
 from strategy.deposit import DepositConfig, run_deposits
 from strategy.runner import close_all, print_positions, run_groups, select_strategy
@@ -24,6 +26,54 @@ class LighterConfig(DepositConfig):
 def setup_useref_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("code", metavar="CODE", help="Referral code to apply")
     parser.add_argument("-a", "--account", metavar="NAME", help="Use one enabled account")
+
+
+async def sync_trades(acc: LighterClient, ttl: int) -> list[LighterTrade]:
+    store_path = f".cache/lighter_{short_addr(acc.address)}_trades.pkl"
+    store = DataStore(store_path, id_key="trade_id", model=LighterTrade)
+    await store.sync(acc.trades, ttl_sec=ttl)
+    return store.get_all()
+
+
+async def sync_funding(acc: LighterClient, ttl: int) -> list[LighterFunding]:
+    store_path = f".cache/lighter_{short_addr(acc.address)}_funding.pkl"
+    store = DataStore(store_path, id_key="funding_id", model=LighterFunding)
+    await store.sync(acc.funding_history, ttl_sec=ttl, lookback_sec=3600)
+    return store.get_all()
+
+
+async def print_stats(accs: list[LighterClient], period="week", filter_period="all", force=False):
+    await require_login(accs)
+    ttl = 0 if force else 3600
+    period_fn = to_period_day if period == "day" else LighterClient.to_week_label
+    all_trades, all_funding = await asyncio.gather(
+        gather_accs(accs, lambda acc: sync_trades(acc, ttl)),
+        gather_accs(accs, lambda acc: sync_funding(acc, ttl)),
+    )
+
+    grouped: dict[str, dict[str, PeriodRow]] = defaultdict(dict)
+
+    def row_for(pk: str, name: str) -> PeriodRow:
+        if name not in grouped[pk]:
+            grouped[pk][name] = PeriodRow(name, 0, Decimal(0), Decimal(0), Decimal(0), Decimal(0))
+
+        return grouped[pk][name]
+
+    for acc, trades, funding in zip(accs, all_trades, all_funding):
+        for trade in trades:
+            row = row_for(period_fn(trade.created_at), acc.name)
+            row.trades += 1
+            row.volume += trade.volume
+            row.fees += trade.fee
+            row.burn += trade.fee - trade.realized_pnl
+        for payment in funding:
+            row = row_for(period_fn(payment.created_at), acc.name)
+            row.burn -= payment.change
+
+    all_periods = sorted(grouped)
+    periods_data = {pk: list(grouped[pk].values()) for pk in all_periods}
+    # The leaderboard exposes total points, without a history to assign to periods.
+    render_stats(periods_data, parse_filter(filter_period, all_periods), points=False)
 
 
 async def print_info(accs: list[LighterClient]):
@@ -139,8 +189,12 @@ async def main():
 
     try:
         match cli.command:
-            case "info" | "stats":
+            case "info":
                 await print_info(all_accs)
+            case "stats":
+                await print_stats(
+                    all_accs, period=cli.group, filter_period=cli.filter, force=cli.force
+                )
             case "close":
                 await require_login(act_accs)
                 await close_all(act_accs)

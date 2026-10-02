@@ -195,6 +195,7 @@ def render_stats(
     periods_to_show: list[str],
     *,
     fees: bool = True,
+    points: bool = True,
     points_fmt: str = "{:,.2f}",
     pprice_fmt: str = "{:,.2f}",
     min_vol: int = 1_000,
@@ -212,8 +213,13 @@ def render_stats(
         Column("Trades", "{:,}", total=sum),
         Column("Volume", "{:,.0f}", total=sum),
         Column("Burn", "{:,.2f}", total=sum),
-        Column("Points", points_fmt, total=sum),
-        Column("P/Price", pprice_fmt, compute=lambda r: r["Burn"] / r["Points"]),
+    ]
+    if points:
+        cols += [
+            Column("Points", points_fmt, total=sum),
+            Column("P/Price", pprice_fmt, compute=lambda r: r["Burn"] / r["Points"]),
+        ]
+    cols += [
         Column(
             "$/100k",
             "${:,.2f}",
@@ -240,20 +246,12 @@ def render_stats(
         tbl.subgroup(pk)
         for row in periods.get(pk, []):
             tvol[row.account] += row.volume
+            values = [row.account, row.trades, row.volume, row.burn]
+            if points:
+                values.append(row.points)
             if fees:
-                tbl.add_row(
-                    row.account,
-                    row.trades,
-                    row.volume,
-                    row.burn,
-                    row.points,
-                    row.fees,
-                    tvol[row.account],
-                )
-            else:
-                tbl.add_row(
-                    row.account, row.trades, row.volume, row.burn, row.points, tvol[row.account]
-                )
+                values.append(row.fees)
+            tbl.add_row(*values, tvol[row.account])
 
     tbl.print()
 

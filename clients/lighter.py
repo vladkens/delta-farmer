@@ -114,6 +114,37 @@ class FastWithdrawalResult(BaseModel):
     tx_hash: str = Field(pattern=r"^(0x)?[0-9a-fA-F]{80}$")
 
 
+class LighterTrade(BaseModel):
+    trade_id: int
+    created_at: datetime
+    volume: Decimal
+    realized_pnl: Decimal
+    fee: Decimal
+
+    @classmethod
+    def from_api(cls, item: dict, account_index: int) -> Self:
+        is_ask = item["ask_account_id"] == account_index
+        role = "maker" if is_ask == item["is_maker_ask"] else "taker"
+        side = "ask" if is_ask else "bid"
+        volume = Decimal(item["usd_amount"])
+        # The web client treats absent fees as zero and converts fee ticks by 1e6.
+        fee_rate = Decimal(item.get(f"{role}_fee") or 0)
+        fee_rate += Decimal(item.get(f"integrator_{role}_fee") or 0)
+        return cls(
+            trade_id=item["trade_id"],
+            created_at=datetime.fromtimestamp(item["timestamp"] / 1000, tz=UTC),
+            volume=volume,
+            realized_pnl=Decimal(item.get(f"{side}_account_pnl") or "0"),
+            fee=volume * fee_rate / Decimal("1e6"),
+        )
+
+
+class LighterFunding(BaseModel):
+    funding_id: int
+    created_at: datetime
+    change: Decimal
+
+
 def _deposit_network(layer1: dict, assets: dict) -> DepositNetwork:
     provider = utils.first(
         [x for x in layer1["l1_providers"] if x["chainId"] == ROBINHOOD.chain_id]
@@ -188,6 +219,11 @@ def _has_integrator_approval(account: dict, config: dict) -> bool:
 @bind_log_context
 class LighterClient:
     exchange = "lighter"
+
+    @classmethod
+    def to_week_label(cls, dt: datetime) -> str:
+        genesis = datetime.fromtimestamp(VOLUME_START_TIMESTAMP, tz=UTC)
+        return utils.to_period_week(dt, genesis=genesis)
 
     @classmethod
     def from_config(cls, cfg: AccountConfig) -> Self:
@@ -514,6 +550,69 @@ class LighterClient:
             if error.is_account_missing():
                 return False
             raise
+
+    # MARK: Stats
+
+    async def _history(
+        self,
+        path: str,
+        key: str,
+        params: dict,
+        since: datetime | None,
+        timestamp_scale: int = 1,
+    ) -> list[dict]:
+        account_index = await self._get_account_index()
+        params = {"account_index": account_index, "limit": 100, **params}
+        cutoff = since.timestamp() * timestamp_scale if since else None
+        items: list[dict] = []
+        cursors: set[str] = set()
+        while True:
+            hdr = self._get_auth_headers(account_index)
+            res = await self._call("GET", path, params=params, headers=hdr)
+            page = res[key]
+            for item in page:
+                if cutoff is not None and item["timestamp"] < cutoff:
+                    return items
+
+                items.append(item)
+
+            cursor = res.get("next_cursor")
+            if not page or not cursor:
+                return items
+            if cursor in cursors:
+                raise ApiError(f"Lighter {key} pagination did not advance")
+
+            cursors.add(cursor)
+            params = {**params, "cursor": cursor}
+
+    async def trades(self, since: datetime | None = None) -> list[LighterTrade]:
+        account_index = await self._get_account_index()
+        params = {
+            "market_type": "perp",
+            "sort_by": "timestamp",
+            "sort_dir": "desc",
+            "ask_filter": -1,
+            "role": "all",
+            "type": "all",
+            "aggregate": "false",
+        }
+        history = await self._history("/api/v1/trades", "trades", params, since, 1000)
+        items = {item["trade_id"]: LighterTrade.from_api(item, account_index) for item in history}
+        return sorted(items.values(), key=lambda item: item.created_at)
+
+    async def funding_history(self, since: datetime | None = None) -> list[LighterFunding]:
+        history = await self._history(
+            "/api/v1/positionFunding", "position_fundings", {"side": "all"}, since
+        )
+        items = {
+            item["funding_id"]: LighterFunding(
+                funding_id=item["funding_id"],
+                created_at=datetime.fromtimestamp(item["timestamp"], tz=UTC),
+                change=Decimal(item["change"]),
+            )
+            for item in history
+        }
+        return sorted(items.values(), key=lambda item: item.created_at)
 
     # MARK: Markets
 
