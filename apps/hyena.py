@@ -145,7 +145,7 @@ async def print_stats(
             vol = sum((Decimal(str(f["px"])) * Decimal(str(f["sz"])) for f in fills), Decimal(0))
             fee = sum((Decimal(str(f["fee"])) for f in fills), Decimal(0))
             pnl = sum((Decimal(str(f.get("closedPnl", 0))) for f in fills), Decimal(0))
-            rows.append(PeriodRow(name, len(fills), vol, -pnl, points, fee))
+            rows.append(PeriodRow(name, len(fills), vol, fee - pnl, points, fee))
         periods_data[pk] = rows
 
     render_stats(periods_data, periods_to_show, points_fmt="{:,.0f}", pprice_fmt="{:,.4f}")

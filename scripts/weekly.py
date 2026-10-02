@@ -165,7 +165,8 @@ def hyena_stats() -> Stats:
             lbl = HyenaClient.to_week_label(dt)
             vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
             vol += Decimal(str(r["px"])) * Decimal(str(r["sz"]))
-            out[lbl] = (vol, burn - Decimal(str(r.get("closedPnl", 0))))
+            pnl = Decimal(str(r.get("closedPnl", 0))) - Decimal(str(r["fee"]))
+            out[lbl] = (vol, burn - pnl)
     return out
 
 
@@ -289,7 +290,7 @@ def hyena_burn_weeks() -> ISOData:
             dt = datetime.fromtimestamp(r["time"] / 1000, tz=UTC)
             w = _to_iso_week(dt)
             out[w][0] += Decimal(str(r["px"])) * Decimal(str(r["sz"]))
-            out[w][1] -= Decimal(str(r.get("closedPnl", 0)))
+            out[w][1] += Decimal(str(r["fee"])) - Decimal(str(r.get("closedPnl", 0)))
     for path in glob_cache("hyena_", "_rewards.pkl"):
         for r in load_pkl(path):
             dt = (

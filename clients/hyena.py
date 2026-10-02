@@ -283,6 +283,7 @@ class HyenaClient(HyperLiquidClient):
             (Decimal(str(f["px"])) * Decimal(str(f["sz"])) for f in hyena_fills), Decimal(0)
         )
         pnl = sum((Decimal(str(f.get("closedPnl", 0))) for f in hyena_fills), Decimal(0))
+        pnl -= sum((Decimal(str(f["fee"])) for f in hyena_fills), Decimal(0))
 
         addr = utils.short_addr(self.address)
         epts = rewards.balance.enaxPoints
