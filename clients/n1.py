@@ -538,7 +538,7 @@ class N1Client:
             seen_cursors.add(next_cursor)
             cursor = next_cursor
 
-        fields = ["actionId", "marketId", "tradeId", "orderId", "time"]
+        fields = ["actionId", "subActionId", "marketId", "tradeId", "orderId", "time"]
         for r in records:
             values = [str(r[x]) for x in fields if x in r]
             assert len(values) > 0, f"No ID fields found in record: {r}"
@@ -824,28 +824,25 @@ class N1Client:
         )
         return Decimal(str(data["data"]["lifetimeVolumeUsd"]))
 
-    async def _total_pnl(self, acc_id: int) -> Decimal:
-        data = await self._n1_call(
-            "/v1/app/analytics/account-overview",
-            params={
-                "accountId": str(acc_id),
-                "include": "summary",
-                "pnlLimit": "0",
-                "positionSnapshotsLimit": "0",
-                "positionSnapshotsPositionsMode": "summary",
-                "dailyLimit": "0",
-                "closedTradesLimit": "0",
-                "marketVolumeLimit": "0",
-            },
-        )
-        return Decimal(str(data["summary"]["snapshot"]["totalPnl"]))
+    async def position_history(self, acc_id: int, since: datetime | None = None) -> list[dict]:
+        return await self.paged(f"/account/{acc_id}/history/position", since)
 
-    async def daily_pnl(self, acc_id: int) -> list[dict]:
-        data = await self._n1_call(
-            "/v1/app/analytics/daily-pnl",
-            params={"accountId": str(acc_id), "limit": "730"},
+    async def _total_pnl(self, acc_id: int) -> Decimal:
+        positions, maker, taker = await asyncio.gather(
+            self.position_history(acc_id),
+            self.paged(f"/trades?makerId={acc_id}"),
+            self.paged(f"/trades?takerId={acc_id}"),
         )
-        return data.get("items", [])
+        pnl = sum(
+            (
+                Decimal(str(x.get("tradingPnl", 0))) + Decimal(str(x.get("fundingPnlDelta", 0)))
+                for x in positions
+            ),
+            Decimal(0),
+        )
+        fees = sum((Decimal(str(x["makerFee"])) for x in maker), Decimal(0))
+        fees += sum((Decimal(str(x["takerFee"])) for x in taker), Decimal(0))
+        return pnl - fees
 
     async def profile(self) -> ProfileInfo:
         _, acc_id = await self._ensure_session()

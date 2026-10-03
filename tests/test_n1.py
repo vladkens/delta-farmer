@@ -49,7 +49,13 @@ async def test_stats_keep_net_pnl(monkeypatch):
         "_fetch_stats",
         AsyncMock(
             return_value={
-                "pnl": [{"day": "2026-06-11", "pnl": -5}],
+                "positions": [
+                    {
+                        "time": "2026-06-11T12:00:00Z",
+                        "tradingPnl": -3,
+                        "fundingPnlDelta": -1,
+                    }
+                ],
                 "trades": [
                     {
                         "time": "2026-06-11T12:00:00Z",

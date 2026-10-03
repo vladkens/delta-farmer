@@ -40,19 +40,19 @@ async def sync_trades(acc: N1Client, role: str, acc_id: int, ttl: int) -> list[d
     return store.get_all()
 
 
-async def sync_pnl(acc: N1Client, acc_id: int, ttl: int) -> list[dict]:
-    store_path = f".cache/n1_{short_addr(acc.address)}_pnl.pkl"
-    store = DataStore(store_path, id_key="day")
-    await store.sync(lambda _: acc.daily_pnl(acc_id), ttl_sec=ttl)
+async def sync_positions(acc: N1Client, acc_id: int, ttl: int) -> list[dict]:
+    store_path = f".cache/n1_{short_addr(acc.address)}_positions.pkl"
+    store = DataStore(store_path, id_key="uid")
+    await store.sync(lambda since: acc.position_history(acc_id, since), ttl_sec=ttl)
     return store.get_all()
 
 
 async def _fetch_stats(acc: N1Client, ttl: int) -> dict:
     _, acc_id = await acc._ensure_session()
-    maker, taker, pnl = await asyncio.gather(
+    maker, taker, positions = await asyncio.gather(
         sync_trades(acc, "maker", acc_id, ttl),
         sync_trades(acc, "taker", acc_id, ttl),
-        sync_pnl(acc, acc_id, ttl),
+        sync_positions(acc, acc_id, ttl),
     )
 
     for t in maker:
@@ -61,7 +61,7 @@ async def _fetch_stats(acc: N1Client, ttl: int) -> dict:
         t["fee"] = Decimal(str(t["takerFee"]))
 
     trades = maker + taker
-    return {"trades": trades, "pnl": pnl}
+    return {"trades": trades, "positions": positions}
 
 
 # MARK: Reports
@@ -108,9 +108,10 @@ async def print_stats(accs: list[N1Client], period="week", filter_period="all", 
     gvol: DD[Decimal] = defaultdict(lambda: defaultdict(Decimal))
 
     for acc, stats in zip(accs, stats_list):
-        for t in stats["pnl"]:
-            dt = datetime.fromisoformat(t["day"]).replace(tzinfo=UTC)
-            gpnl[period_fn(dt)][acc.name] += Decimal(str(t["pnl"]))
+        for p in stats["positions"]:
+            dt = datetime.fromisoformat(p["time"].rstrip("Z")).replace(tzinfo=UTC)
+            gpnl[period_fn(dt)][acc.name] += Decimal(str(p.get("tradingPnl", 0)))
+            gpnl[period_fn(dt)][acc.name] += Decimal(str(p.get("fundingPnlDelta", 0)))
 
         for t in stats["trades"]:
             dt = datetime.fromisoformat(t["time"].rstrip("Z")).replace(tzinfo=UTC)
@@ -136,10 +137,10 @@ async def print_stats(accs: list[N1Client], period="week", filter_period="all", 
             fee = gfee[pk].get(name, Decimal(0))
             vol = gvol[pk].get(name, Decimal(0))
 
-            if not vol and not pts:
+            if not vol and not pnl and not fee and not pts:
                 continue
 
-            rows.append(PeriodRow(name, cnt, vol, -pnl, pts, fee))
+            rows.append(PeriodRow(name, cnt, vol, fee - pnl, pts, fee))
         periods_data[pk] = rows
 
     render_stats(periods_data, periods_to_show, pprice_fmt="{:,.3f}")

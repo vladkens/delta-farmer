@@ -138,19 +138,17 @@ def pacifica_stats() -> Stats:
 def n1_stats() -> Stats:
     vols: defaultdict[str, Decimal] = defaultdict(Decimal)
     burns: defaultdict[str, Decimal] = defaultdict(Decimal)
-    seen: set[str] = set()
-    for path in glob_cache("n1_", "_trades_maker.pkl") + glob_cache("n1_", "_trades_taker.pkl"):
+    for role in ("maker", "taker"):
+        for path in glob_cache("n1_", f"_trades_{role}.pkl"):
+            for r in load_pkl(path):
+                lbl = N1Client.to_week_label(parse_dt(r["time"]))
+                vols[lbl] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
+                burns[lbl] += Decimal(str(r[f"{role}Fee"]))
+    for path in glob_cache("n1_", "_positions.pkl"):
         for r in load_pkl(path):
-            tid = str(r.get("tradeId", r.get("uid", "")))
-            if tid in seen:
-                continue
-            seen.add(tid)
             lbl = N1Client.to_week_label(parse_dt(r["time"]))
-            vols[lbl] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
-    for path in glob_cache("n1_", "_pnl.pkl"):
-        for r in load_pkl(path):
-            lbl = N1Client.to_week_label(parse_dt(r["day"]))
-            burns[lbl] -= Decimal(str(r["pnl"]))
+            burns[lbl] -= Decimal(str(r.get("tradingPnl", 0)))
+            burns[lbl] -= Decimal(str(r.get("fundingPnlDelta", 0)))
     all_lbls = set(vols) | set(burns)
     return {lbl: (vols[lbl], burns[lbl]) for lbl in all_lbls}
 
@@ -362,19 +360,17 @@ def rise_burn_weeks() -> ISOData:
 
 def n1_burn_weeks() -> ISOData:
     out = _isoout()
-    seen: set[str] = set()
-    for path in glob_cache("n1_", "_trades_maker.pkl") + glob_cache("n1_", "_trades_taker.pkl"):
+    for role in ("maker", "taker"):
+        for path in glob_cache("n1_", f"_trades_{role}.pkl"):
+            for r in load_pkl(path):
+                w = _to_iso_week(parse_dt(r["time"]))
+                out[w][0] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
+                out[w][1] += Decimal(str(r[f"{role}Fee"]))
+    for path in glob_cache("n1_", "_positions.pkl"):
         for r in load_pkl(path):
-            tid = str(r.get("tradeId", r.get("uid", "")))
-            if tid in seen:
-                continue
-            seen.add(tid)
             w = _to_iso_week(parse_dt(r["time"]))
-            out[w][0] += Decimal(str(r["price"])) * Decimal(str(r["baseSize"]))
-    for path in glob_cache("n1_", "_pnl.pkl"):
-        for r in load_pkl(path):
-            w = _to_iso_week(parse_dt(r["day"]))
-            out[w][1] -= Decimal(str(r["pnl"]))
+            out[w][1] -= Decimal(str(r.get("tradingPnl", 0)))
+            out[w][1] -= Decimal(str(r.get("fundingPnlDelta", 0)))
     for w, pts in _isopts("n1_", "start_window", "points").items():
         out[w][2] += pts
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
@@ -525,7 +521,11 @@ def _available_labels(
 ) -> list[str]:
     if pts_map:
         with_pts = {k: v for k, v in pts_map.items() if v > 0}
-        return sorted(with_pts) if with_pts else sorted(pts_map)
+        return (
+            sorted(set(periods) | set(with_pts))
+            if with_pts
+            else sorted(set(periods) | set(pts_map))
+        )
     if periods and current_period_fn:
         current = current_period_fn(now)
         completed = [k for k in periods if not k.startswith("OFF ") and k < current]
