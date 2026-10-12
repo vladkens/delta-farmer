@@ -309,6 +309,28 @@ async def test_limit_close(monkeypatch):
     assert rest.calls == ["close:BTC"]
 
 
+@pytest.mark.parametrize(("configured", "canonical"), [("nvda", "NVDA"), ("XYZ:NVDA", "xyz:NVDA")])
+async def test_symbol_case_preserves_position_monitoring_and_closure(configured, canonical):
+    lead, rest = Client("lead"), Client("rest")
+    lead.get_symbols = AsyncMock(return_value=[canonical])
+    lead.get_lot_size = AsyncMock(return_value=Decimal("0.001"))
+    lead.positions_value = [position(canonical, "bid", "0.002")]
+    rest.positions_value = [position(canonical, "ask", "0.002")]
+    cfg = make_cfg(symbols=[configured])
+
+    await _check_symbols(cfg, [lead, rest])
+    active = trade(lead, rest, cfg.symbols[0])
+    await active.open(cfg)
+    summary = await active.state(cfg)
+    await active.close(cfg)
+
+    lead.get_lot_size.assert_awaited_once_with(canonical)
+    assert summary.healthy is True
+    assert summary.open_leg_count == 2
+    assert lead.calls == [f"market:{canonical}:bid:0.002", f"close:{canonical}"]
+    assert rest.calls == [f"market:{canonical}:ask:0.002", f"close:{canonical}"]
+
+
 async def test_symbols_once_per_exchange():
     class CountingClient(Client):
         def __init__(self, name: str, exchange: str):

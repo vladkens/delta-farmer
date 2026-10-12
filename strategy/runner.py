@@ -160,11 +160,19 @@ async def _check_accounts(accs: Sequence[TradingClient]) -> None:
 
 
 async def _check_symbols(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+    available = await accs[0].get_symbols()
+    canonical = {symbol.casefold(): symbol for symbol in available}
+    symbols = [
+        symbol if symbol in available else canonical.get(symbol.casefold(), symbol)
+        for symbol in cfg.symbols
+    ]
+
     async def symbol_exists(acc: TradingClient, symbol: str) -> bool:
         await acc.get_lot_size(symbol)
         return True
 
-    await ensure_exchange_symbols(accs, cfg.symbols, symbol_exists)
+    await ensure_exchange_symbols(accs, symbols, symbol_exists)
+    cfg.symbols = symbols
 
 
 async def _run_group(
