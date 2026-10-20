@@ -208,36 +208,66 @@ class DeltaStrategy:
             logger.error("No valid account combination found for trading.")
             return
 
-        # 3. Prepare trades to execute
+        # 3. Validate the whole plan, parts included, before changing anything on accounts
         for trade in trades:
             await trade.load_qtys()
             await trade.check_min_sizes()
+
+        n_parts = await self._fit_parts(trades)
+        parts = [trade.split(n_parts) for trade in trades]
+
+        for trade in trades:
             await trade.check_leverage(self.cfg.leverage)
             await trade.log_plan()
 
-        # Wait until all selected markets are acceptable, then try to open them quickly.
-        gate_ok = await asyncio.gather(*[trade.gate(self.cfg) for trade in trades])
-        if not all(gate_ok):
-            return
+        # 4. Open in rounds: one part of every trade per round, each round gated on entry quality
+        opened = 0
+        msgid, stime, act_usd = None, time.time(), Decimal(0)
+        for i, round_parts in enumerate(zip(*parts)):
+            if i > 0 and self.stop_event and self.stop_event.is_set():
+                break  # keep the opened parts; monitoring sees the stop and closes them
 
-        # Notify Telegram (if enabled)
-        act_usd = sum(sum(leg.size_usd for leg in trade.legs) for trade in trades)
-        s_names = [trade.symbol for trade in trades]
-        a_names = [leg.client.name for trade in trades for leg in trade.legs]
-        a_names = list(dict.fromkeys(a_names))  # unique while preserving order
-        msgid = await tg.on_trade_start(s_names, float(act_usd), a_names)
-        stime = time.time()
+            gate_ok = await asyncio.gather(*[part.gate(self.cfg) for part in round_parts])
+            if not all(gate_ok):
+                if i == 0:
+                    return
 
-        # 4. Open trades one by one
-        for trade in trades:
-            await trade.open(self.cfg)
+                logger.warning(f"Entry gate failed at part {i + 1}/{n_parts}; keeping {i} parts")
+                break
+
+            if i == 0:  # notify Telegram (if enabled)
+                act_usd = sum(sum(leg.size_usd for leg in trade.legs) for trade in trades)
+                s_names = [trade.symbol for trade in trades]
+                a_names = [leg.client.name for trade in trades for leg in trade.legs]
+                a_names = list(dict.fromkeys(a_names))  # unique while preserving order
+                msgid = await tg.on_trade_start(s_names, float(act_usd), a_names)
+                stime = time.time()
+
+            for part in round_parts:
+                await part.open(self.cfg)
+
+            opened = i + 1
+            if n_parts > 1:
+                logger.info(f"Opened part {opened}/{n_parts}")
+
+        if opened < n_parts:
+            for trade, trade_parts in zip(trades, parts):
+                trade.keep(trade_parts[:opened])
 
         # 5. Wait with safety checks
         success = await self.monitor_trades(trades, duration)
 
-        # 6. Close trades one by one
+        # 6. Close in parts after a normal hold; a risk exit closes everything at once
+        use_limit = self.cfg.use_limit and success
+        if success and opened > 1:
+            for remaining in range(opened, 1, -1):
+                for trade in trades:
+                    await trade.reduce(self.cfg, remaining, use_limit=use_limit)
+
+                logger.info(f"Closed part {opened - remaining + 1}/{opened}")
+
         for trade in trades:
-            await trade.close(self.cfg, use_limit=self.cfg.use_limit and success)
+            await trade.close(self.cfg, use_limit=use_limit)
 
         # 7. Report P/L
         now_bals = await self.get_balances(accounts)
@@ -246,6 +276,23 @@ class DeltaStrategy:
         await tg.on_trade_stop(pnl, dur, float(act_usd), now_bals.items(), msgid)
 
     # MARK: Helpers
+
+    async def _fit_parts(self, trades: list[DeltaTrade]) -> int:
+        """Most parts, up to `trade_parts`, that keep every part at or above each exchange minimum."""
+        for n in range(self.cfg.trade_parts, 1, -1):
+            try:
+                parts = [part for trade in trades for part in trade.split(n)]
+            except ValueError:  # fewer lots than parts
+                continue
+
+            if not any([await part.below_min() for part in parts]):
+                if n < self.cfg.trade_parts:
+                    logger.warning(f"Part size below exchange minimum; using {n} parts")
+                return n
+
+        if self.cfg.trade_parts > 1:
+            logger.warning("Part size below exchange minimum; trading in one part")
+        return 1
 
     async def monitor_trades(self, trades: list[DeltaTrade], duration: int) -> bool:
         logger.info(utils.wait_msg(duration))
@@ -285,7 +332,8 @@ class DeltaStrategy:
         drift = limit_wait * 2
         seq_limit = limit_wait * self.cfg.symbols_per_trade
         open_at = now + timedelta(seconds=int(self.cfg.entry_gate_wait) + seq_limit + drift)
-        close_at = open_at + timedelta(seconds=int(duration) + seq_limit)
+        exit_at = int(duration) + seq_limit * self.cfg.trade_parts
+        close_at = open_at + timedelta(seconds=exit_at)
 
         async def check(client: TradingClient, symbol: str) -> bool:
             ok_open = await client.is_symbol_tradeable(symbol, open_at)

@@ -280,6 +280,16 @@ entry_gate_wait = "5m"
 entry_gate_poll = "3s"
 ```
 
+### Entering and exiting in parts
+
+Large positions can be opened and closed in several equal parts instead of one order, which reduces the price impact of each order:
+
+```toml
+trade_parts = 4
+```
+
+Each part keeps the accounts balanced and passes the entry-quality check before it opens. If a later part fails that check, the cycle keeps the parts already opened. Positions are closed in the same number of parts after a normal hold; a safety exit closes everything at once. Every part must meet the exchange minimum order size, and the default `trade_parts = 1` keeps single orders.
+
 ### Safety settings
 
 ```toml

@@ -418,6 +418,9 @@ class PlannedTrade:
     async def load_qtys(self) -> None:
         self.events.append(f"{self.symbol}:prepare")
 
+    def split(self, parts: int) -> list["PlannedTrade"]:
+        return [self]
+
     async def check_min_sizes(self) -> None:
         return None
 

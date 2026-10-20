@@ -36,6 +36,16 @@ async def _fill_limit_order(
     )
 
 
+def split_qty(qty: Decimal, lot: Decimal, parts: int) -> list[Decimal]:
+    """Split a lot-aligned qty into parts that differ by at most one lot and sum to qty."""
+    units = qty / lot
+    if units != units.to_integral_value():
+        raise ValueError(f"qty {qty} is not a multiple of lot {lot}")
+
+    units = int(units)
+    return [lot * (units * (i + 1) // parts - units * i // parts) for i in range(parts)]
+
+
 def calc_symbol_sizes(
     total: Decimal, symbols: Sequence[str], lead_side: Side
 ) -> dict[str, tuple[Decimal, Side]]:  # {symbol: (size, side)}
@@ -142,14 +152,45 @@ class DeltaTrade:
     symbol: str
     lead: DeltaLeg
     rest: list[DeltaLeg] = field(default_factory=list)
+    lot_size: Decimal = Decimal(0)
 
     @property
     def legs(self) -> list[DeltaLeg]:
         return [self.lead] + self.rest
 
+    def split(self, parts: int) -> list["DeltaTrade"]:
+        """Plan equal entry parts. Each part's lead equals its hedges, so every part is neutral."""
+        if parts == 1:
+            return [self]
+
+        if self.lead.qty != sum(leg.qty for leg in self.rest):
+            raise ValueError(f"{self.symbol}: legs are unbalanced, cannot split into parts")
+
+        def part(leg: DeltaLeg, qty: Decimal) -> DeltaLeg:
+            return DeltaLeg(leg.client, leg.side, leg.size_usd * qty / leg.qty, qty)
+
+        rest_parts = [split_qty(leg.qty, self.lot_size, parts) for leg in self.rest]
+        out: list[DeltaTrade] = []
+        for i in range(parts):
+            qtys = [qty[i] for qty in rest_parts]
+            if not all(qtys):
+                raise ValueError(f"{self.symbol}: size is too small for {parts} parts")
+
+            lead = part(self.lead, sum(qtys, Decimal(0)))
+            rest = [part(leg, qty) for leg, qty in zip(self.rest, qtys)]
+            out.append(DeltaTrade(self.symbol, lead, rest, self.lot_size))
+
+        return out
+
+    def keep(self, parts: list["DeltaTrade"]) -> None:
+        """Shrink the trade to the parts actually opened, so monitoring checks the real size."""
+        for i, leg in enumerate(self.legs):
+            leg.qty = sum((p.legs[i].qty for p in parts), Decimal(0))
+            leg.size_usd = sum((p.legs[i].size_usd for p in parts), Decimal(0))
+
     async def load_qtys(self) -> None:
         price = await self.lead.client.get_price(self.symbol)
-        lot_size = await self.lead.client.get_lot_size(self.symbol)
+        lot_size = self.lot_size = await self.lead.client.get_lot_size(self.symbol)
         for leg in self.legs:
             leg.qty = usd_to_qty(leg.size_usd, price, lot_size)
 
@@ -186,9 +227,12 @@ class DeltaTrade:
 
         await asyncio.gather(*[_ensure(leg.client) for leg in self.legs])
 
-    async def check_min_sizes(self):
+    async def below_min(self) -> list[tuple[DeltaLeg, Decimal]]:
         mins = await asyncio.gather(*[x.client.get_min_trade_usd(self.symbol) for x in self.legs])
-        vals = [(act, val) for act, val in zip(self.legs, mins) if act.size_usd < val]
+        return [(act, val) for act, val in zip(self.legs, mins) if act.size_usd < val]
+
+    async def check_min_sizes(self):
+        vals = await self.below_min()
         if not vals:
             return
 
@@ -239,6 +283,36 @@ class DeltaTrade:
         legs = self.legs if not use_limit else self.rest
         await asyncio.gather(*[_close(leg) for leg in legs])
         # todo: report closed log with spread info
+
+    async def reduce(self, cfg: TradeConfig, remaining: int, use_limit=False) -> None:
+        """Close 1/remaining of each leg's position; a final close() takes the exact rest."""
+
+        async def _reduce(leg: DeltaLeg, limit: bool) -> None:
+            lot = await leg.client.get_lot_size(self.symbol)
+            for pos in await self._positions(leg.client):
+                qty = round_to_tick_size(pos.size / remaining, lot)
+                if qty <= 0:
+                    continue
+
+                side = opposite_side(pos.side)
+                if limit:
+                    clt = leg.client
+                    order = await _fill_limit_order(
+                        clt, self.symbol, side, qty, cfg, reduce_only=True
+                    )
+                    if order is None:  # never reduce hedges past an unreduced lead
+                        raise RuntimeError(f"Limit reduce failed for {clt.name} on {self.symbol}")
+                else:
+                    await leg.client.market_order(self.symbol, side, qty, reduce_only=True)
+
+                log = logger.bind(account=leg.client.name)
+                log.debug(f"Reduced {qty} {self.symbol} of {pos.size}")
+
+        if use_limit:
+            await _reduce(self.lead, limit=True)
+
+        legs = self.legs if not use_limit else self.rest
+        await asyncio.gather(*[_reduce(leg, limit=False) for leg in legs])
 
     # MARK: Monitoring
 

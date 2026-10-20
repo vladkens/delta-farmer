@@ -12,6 +12,7 @@ first_as_prime = true  # true = first account is always prime; false = random ea
 trade_size_usd = { min = 140, max = 160 }       # Total size in USD at the leverage above (split 50% prime / 50% hedge)
 trade_duration  = { min = "15m", max = "20m" }  # How long to hold positions
 trade_cooldown  = { min = "3m",  max = "6m"  }  # Pause between trades
+# trade_parts = 4                               # Enter and exit in equal parts (see README)
 
 # Exchange balance management (Omni and Lighter)
 # balance_target = 310

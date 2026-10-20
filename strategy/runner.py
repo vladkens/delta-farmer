@@ -286,7 +286,8 @@ async def _run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
             stop_event.set()
 
             limit_wait = cfg.limit_wait_budget if cfg.use_limit else 0
-            max_wait = limit_wait * cfg.symbols_per_trade * 2 + int(cfg.trade_duration.max) + 60
+            limit_wait *= cfg.symbols_per_trade * 2 * cfg.trade_parts
+            max_wait = limit_wait + int(cfg.trade_duration.max) + 60
             await utils.gather_cancel(tasks, max_wait)
         finally:
             stop_event.set()

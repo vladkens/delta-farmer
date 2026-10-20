@@ -207,6 +207,7 @@ class TradeConfig(BaseModel):
     trade_size_pct: float | None = Field(None, ge=0.01, le=1.0)
     trade_duration: TimeRange
     trade_cooldown: TimeRange
+    trade_parts: int = Field(1, ge=1, le=10)  # enter and exit in this many equal parts
     trade_heartbeat: DurationSec = DurationSec("15s")
     position_roi_limit: float = Field(0.8, gt=0, lt=1)
     combined_roi_limit: float = Field(0.1, gt=0, lt=1)
