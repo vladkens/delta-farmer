@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -507,3 +508,56 @@ async def test_failure_closes_positions(monkeypatch):
     await strategy.run()
 
     assert close_all.await_count == 2
+
+
+async def test_failed_cleanup_retries_before_trading(monkeypatch):
+    # A closed market refuses closes; positions are known, so cleanup retries
+    # with backoff instead of stopping, and no cycle starts until it succeeds.
+    events: list[str] = []
+    results = iter([True, False, False, False, True, True])
+
+    async def close_all(accounts):
+        ok = next(results)
+        events.append(f"cleanup:{ok}")
+        return ok
+
+    async def trade_cycle():
+        events.append("trade")
+        if events.count("trade") == 1:
+            raise RuntimeError("Market is not open for trading")
+        raise asyncio.CancelledError
+
+    clients = cast(list[TradingClient], [Client("prime"), Client("hedge")])
+    strategy = DeltaStrategy(make_cfg(), clients)
+    strategy.trade_cycle = trade_cycle
+    strategy._wait = AsyncMock()
+    on_error = AsyncMock()
+    monkeypatch.setattr("strategy.cycle.close_all", close_all)
+    monkeypatch.setattr("strategy.cycle.tg.on_error", on_error)
+
+    await strategy.run()
+
+    assert events == [
+        "cleanup:True",
+        "trade",
+        "cleanup:False",
+        "cleanup:False",
+        "cleanup:False",
+        "cleanup:True",
+        "trade",
+        "cleanup:True",
+    ]
+    assert [call.args[1] for call in on_error.await_args_list] == [1, 2]
+
+
+async def test_shutdown_with_failed_cleanup_reports_open_positions(monkeypatch):
+    clients = cast(list[TradingClient], [Client("prime"), Client("hedge")])
+    strategy = DeltaStrategy(make_cfg(), clients)
+    strategy.trade_cycle = AsyncMock(side_effect=asyncio.CancelledError)
+    error = Mock()
+    monkeypatch.setattr("strategy.cycle.close_all", AsyncMock(side_effect=[True, False]))
+    monkeypatch.setattr("strategy.cycle.logger.error", error)
+
+    await strategy.run()
+
+    error.assert_called_once_with("Shutdown cleanup incomplete; close positions manually")

@@ -11,6 +11,7 @@ from decimal import Decimal
 from lib import telegram as tg
 from lib import utils
 from lib.decorators import retry
+from lib.errors import AppError
 from lib.logger import logger
 from lib.utils import round_to_tick_size
 
@@ -137,12 +138,16 @@ class DeltaStrategy:
     async def run(self):
         bals = await self.get_balances(self.accounts)
         self.initial_bal = bals.total
-        await close_all(self.accounts)  # clean up leftovers from a previous run
+        clean = False  # close leftovers of a previous run before the first cycle
 
         failures = 0
         while True:
             try:
                 print("-" * 60) if not self.cfg.group_size else None
+                # Never trade on top of positions a failed cleanup left open.
+                if not clean and not (clean := await close_all(self.accounts)):
+                    raise AppError("Cleanup incomplete; positions remain open")
+
                 await self.trade_cycle()
                 failures = 0
                 await self._wait(self.cfg.trade_cooldown.sample())
@@ -150,11 +155,14 @@ class DeltaStrategy:
                 logger.info(
                     "Stop requested, closing all positions; press Ctrl-C again only to force exit"
                 )
-                await close_all(self.accounts)
+                if not await close_all(self.accounts):
+                    logger.error("Shutdown cleanup incomplete; close positions manually")
+                    return
+
                 logger.info("Shutdown cleanup complete")
                 return
             except Exception as e:
-                await close_all(self.accounts)
+                clean = await close_all(self.accounts)
 
                 failures += 1
                 if self.cfg.max_failures > 0 and failures >= self.cfg.max_failures:

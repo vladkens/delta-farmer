@@ -364,8 +364,8 @@ async def fill_limit_order(
 # MARK: Execution primitives
 
 
-async def close_all(accs: Sequence[TradingClient], _attempts: int = 3) -> None:
-    """Best-effort cleanup — retries on failure, never raises. cancel/close are idempotent."""
+async def close_all(accs: Sequence[TradingClient], _attempts: int = 3) -> bool:
+    """Best-effort cleanup — retries, never raises; False if something stayed open."""
     n_failed = 0
     for attempt in range(_attempts):
         rs1 = await asyncio.gather(*[a.cancel_all_orders() for a in accs], return_exceptions=True)
@@ -377,10 +377,11 @@ async def close_all(accs: Sequence[TradingClient], _attempts: int = 3) -> None:
         if n_orders + n_positions > 0:
             logger.info(f"Closed {n_orders} orders and {n_positions} positions")
         if not n_failed:
-            return
+            return True
 
         if attempt < _attempts - 1:
             logger.warning(f"close_all: {n_failed} failed, retrying ({attempt + 1}/{_attempts})...")
             await asyncio.sleep(2.0 * 2**attempt)
 
     logger.warning(f"close_all: still {n_failed} account(s) failed after {_attempts} attempts")
+    return False
