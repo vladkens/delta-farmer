@@ -209,8 +209,12 @@ async def test_trade_roi_limit():
 
 @pytest.mark.parametrize(
     ("lead_positions", "reason"),
-    [([], "missing positions (1/2)"), ([position("BTC", "bid", "0.001")], "position size drift")],
-    ids=["missing", "drift"],
+    [
+        ([], "missing positions (1/2)"),
+        ([position("BTC", "bid", "0.001")], "position size drift"),
+        ([position("BTC", "ask", "0.002")], "position size drift"),
+    ],
+    ids=["missing", "drift", "flipped"],
 )
 async def test_unsafe_positions(lead_positions, reason):
     lead, rest = Client("lead"), Client("rest")

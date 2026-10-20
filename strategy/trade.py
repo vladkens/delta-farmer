@@ -258,7 +258,9 @@ class DeltaTrade:
             sign = Decimal(1) if pos.side == "bid" else Decimal(-1)
             pnl = (pos.size * price - entry_cost) * sign
             roi = pnl / entry_cost if entry_cost else Decimal(0)
-            drift = bool(leg.qty) and abs(pos.size - leg.qty) / leg.qty > SIZE_DRIFT_LIMIT
+            drift = pos.side != leg.side or (
+                bool(leg.qty) and abs(pos.size - leg.qty) / leg.qty > SIZE_DRIFT_LIMIT
+            )
             return pnl, entry_cost, roi, drift
 
         data = [d for d in await asyncio.gather(*[leg_data(leg) for leg in self.legs]) if d]
