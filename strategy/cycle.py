@@ -301,15 +301,31 @@ class DeltaStrategy:
         error_guard = RepeatErrorGuard("Position safety check failed")
         combined_roi_limit = Decimal(str(self.cfg.combined_roi_limit))
 
-        while time.time() < until:
+        market_closed = False
+        while True:
             if self.stop_event and self.stop_event.is_set():
                 logger.info("Stop event received, exiting early")
                 return False
 
-            sleep_for = min(self.cfg.trade_heartbeat, until - time.time())
-            await asyncio.sleep(max(0, sleep_for))
+            left = until - time.time()
+            if left <= 0 and not market_closed:
+                return True
+
+            # Holding through a market closure is normal; the close waits until it reopens.
+            await asyncio.sleep(
+                min(self.cfg.trade_heartbeat, left) if left > 0 else self.cfg.trade_heartbeat
+            )
 
             with error_guard():
+                if market_closed != (market_closed := not await self._markets_open(trades)):
+                    logger.info(
+                        "Market closed, holding until it reopens"
+                        if market_closed
+                        else "Market reopened"
+                    )
+                if market_closed:
+                    continue  # no prices while closed, and nothing could be closed anyway
+
                 summaries = await asyncio.gather(*[trade.state(self.cfg) for trade in trades])
                 if any(not s.healthy for s in summaries):
                     for s in (s for s in summaries if not s.healthy):
@@ -321,7 +337,17 @@ class DeltaStrategy:
                     logger.info(f"Combined ROI hit {combined_roi:.2%}, closing...")
                     return False
 
-        return True
+    async def _markets_open(self, trades: list[DeltaTrade]) -> bool:
+        if self.cfg.market_hours == MarketHoursMode.OFF:
+            return True
+
+        now = datetime.now(UTC)
+        checks = [
+            leg.client.is_symbol_tradeable(trade.symbol, now, reduce_only=True)
+            for trade in trades
+            for leg in trade.legs
+        ]
+        return all(await asyncio.gather(*checks))
 
     async def _tradeable_symbols(self, duration: int) -> list[str]:
         if self.cfg.market_hours == MarketHoursMode.OFF:

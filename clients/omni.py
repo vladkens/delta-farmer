@@ -93,12 +93,18 @@ class OmniProfileInfo(ProfileInfo):
     referral_boost: Decimal = Decimal(0)
 
 
+class OmniTradingSession(BaseModel):
+    open: datetime
+    close: datetime
+
+
 class OmniSupportedAsset(BaseModel):
     asset: str
     has_perp: bool = False
     instrument_type: str | None = None
     asset_class: str | None = None
     is_close_only_mode: bool = False
+    trading_sessions: list[OmniTradingSession] = []  # empty: trades around the clock
 
 
 class OmniOrder(BaseModel):
@@ -608,6 +614,10 @@ class OmniClient:
         assets = await self.supported_assets()
         asset = assets.get(symbol)
         if asset is None or not asset.has_perp:
+            return False
+        if asset.trading_sessions and not any(
+            s.open <= at < s.close for s in asset.trading_sessions
+        ):
             return False
         return reduce_only or not asset.is_close_only_mode
 

@@ -243,6 +243,9 @@ async def test_monitor_risk(monkeypatch, healthy, pnl):
     )
 
     class Trade:
+        symbol = "BTC"
+        legs: list[DeltaLeg] = []
+
         async def state(self, cfg):
             return summary
 

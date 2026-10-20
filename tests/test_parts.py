@@ -2,13 +2,15 @@
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from clients.omni import OmniClient, OmniSupportedAsset, OmniTradingSession
 from lib.http import ApiError
 from strategy.cycle import DeltaStrategy
 from strategy.models import (
@@ -96,6 +98,8 @@ class SimClient:
         return Decimal(1000)
 
     async def get_price(self, symbol: str) -> Decimal:
+        if not self.market_open:  # like Omni: no quotes while the market is closed
+            raise ApiError("Market is not open for trading")
         return PRICE
 
     async def get_order_book(self, symbol: str) -> OrderBook:
@@ -114,7 +118,7 @@ class SimClient:
         self.leverage_set.append(leverage)
 
     async def is_symbol_tradeable(self, symbol: str, at: datetime, reduce_only=False) -> bool:
-        return True
+        return self.market_open
 
 
 def make_cfg(**values) -> StrategyConfig:
@@ -363,3 +367,63 @@ async def test_closed_market_during_exit_fails_the_cycle(monkeypatch):
         await strategy.trade_cycle()
 
     assert all(acc.pos.get("BTC") for acc in accounts)  # positions kept for the cleanup retry
+
+
+async def test_hold_through_market_closure_then_close_in_parts(monkeypatch):
+    # The market closes during the hold and is still closed when the hold ends:
+    # keep the position quietly and close it in parts once the market reopens.
+    accounts, trade, net = basket("1.00")
+    strategy = strategy_for(accounts, [trade], monkeypatch, trade_heartbeat=15)
+    clock = SimpleNamespace(now=1000.0)
+    reduced_at: list[float] = []
+
+    async def sleep(sec: float) -> None:
+        clock.now += sec
+        for acc in accounts:
+            acc.market_open = not 1000.5 <= clock.now < 1030
+
+    reduce_part = DeltaTrade.reduce
+
+    async def reduce(self, cfg, remaining, use_limit=False):
+        reduced_at.append(clock.now)
+        await reduce_part(self, cfg, remaining, use_limit=use_limit)
+
+    warning = Mock()
+    monkeypatch.setattr("strategy.cycle.time", SimpleNamespace(time=lambda: clock.now))
+    monkeypatch.setattr("strategy.cycle.asyncio.sleep", sleep)
+    monkeypatch.setattr("strategy.cycle.logger.warning", warning)
+    monkeypatch.setattr(DeltaTrade, "reduce", reduce)
+
+    await strategy.trade_cycle()
+
+    assert reduced_at and min(reduced_at) >= 1030  # nothing was closed while the market was shut
+    assert warning.call_count == 0  # no safety-check noise while prices are unavailable
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+def omni_with(asset: OmniSupportedAsset) -> OmniClient:
+    client = OmniClient("test", "0x" + "11" * 32)
+    client.supported_assets = AsyncMock(return_value={asset.asset: asset})  # type: ignore[method-assign]
+    return client
+
+
+@pytest.mark.parametrize(
+    ("hour", "tradeable"), [(20, True), (21, False), (21.5, False), (22, True), (23, True)]
+)
+async def test_omni_follows_trading_sessions(hour, tradeable):
+    day = datetime(2026, 10, 20, tzinfo=UTC).timestamp()
+    at = datetime.fromtimestamp(day + hour * 3600, UTC)
+    sessions = [
+        OmniTradingSession(open=datetime(2026, 10, 19, 22, tzinfo=UTC), close=datetime(2026, 10, 20, 21, tzinfo=UTC)),
+        OmniTradingSession(open=datetime(2026, 10, 20, 22, tzinfo=UTC), close=datetime(2026, 10, 21, 21, tzinfo=UTC)),
+    ]  # fmt: skip
+    asset = OmniSupportedAsset(asset="US100S", has_perp=True, trading_sessions=sessions)
+
+    assert await omni_with(asset).is_symbol_tradeable("US100S", at) is tradeable
+
+
+async def test_omni_without_sessions_trades_around_the_clock():
+    asset = OmniSupportedAsset(asset="BTC", has_perp=True)
+    at = datetime(2026, 10, 20, 21, 30, tzinfo=UTC)
+
+    assert await omni_with(asset).is_symbol_tradeable("BTC", at) is True
