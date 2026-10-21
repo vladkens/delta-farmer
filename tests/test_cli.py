@@ -1,10 +1,12 @@
 import argparse
 import signal
+import tomllib
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
-from lib.cli import CliParser, _handle_login, create_cli, setup_app
+from lib.cli import CliParser, _get_version, _handle_login, create_cli, setup_app
 from lib.errors import AppError
 from lib.models import AccountConfig
 from lib.utils import confirm
@@ -230,3 +232,27 @@ async def test_license_with_saved_key_only_shows_status(monkeypatch):
     assert console_print.call_args.args[0].plain == (
         "◆  solo  |   3 accounts / 30d · thank you for supporting the work"
     )
+
+
+@pytest.mark.parametrize(
+    ("described", "sha", "expected"),
+    [
+        ("v{v}", "abc1234", ("v{v} ", True)),
+        ("v0.9.0-12-g3672a1b", "3672a1b", ("v0.9.0-12-g3672a1b ", False)),
+        (None, "3672a1b", ("v{v}-g3672a1b ", False)),
+        (None, None, ("v{v}-dev ", False)),
+    ],
+    ids=["release", "after-release", "no-tags", "no-git"],
+)
+def test_version_reports_commits_since_release(monkeypatch, described, sha, expected):
+    with open(Path(__file__).parent.parent / "pyproject.toml", "rb") as fp:
+        version = tomllib.load(fp)["project"]["version"]
+
+    def git(repo, *args):
+        value = described if args[0] == "describe" else sha
+        return value.format(v=version) if value else None
+
+    monkeypatch.setattr("lib.cli._git", git)
+
+    label, release = expected
+    assert _get_version() == (label.format(v=version), release)

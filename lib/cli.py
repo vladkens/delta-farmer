@@ -141,17 +141,14 @@ def cli_anyarg(
     _apply(parser, is_root=True)
 
 
-def _git_tag(repo: str) -> bool:
-    # returns non-zero (CalledProcessError) if HEAD is not exactly on a tag
+def _git(repo: str, *args: str) -> str | None:
     try:
-        subprocess.check_output(
-            ["git", "describe", "--exact-match", "--tags", "HEAD"],
-            cwd=repo,
-            stderr=subprocess.DEVNULL,
+        out = subprocess.check_output(
+            ["git", *args], cwd=repo, stderr=subprocess.DEVNULL, text=True
         )
-        return True
+        return out.strip() or None
     except Exception:
-        return False
+        return None
 
 
 def _get_version() -> tuple[str, bool]:
@@ -163,10 +160,16 @@ def _get_version() -> tuple[str, bool]:
         if not version:
             return "", True
 
+        # Release tag, or e.g. v0.10.1-10-g2995889 (10 commits after it); v0.10.1-g2995889 without tags
         repo = os.path.join(os.path.dirname(__file__), "..")
-        if _git_tag(repo):
+        described = _git(repo, "describe", "--tags", "--match", "v[0-9]*.[0-9]*.[0-9]*")
+        if described == f"v{version}":
             return f"v{version} ", True
-        return f"v{version}-dev ", False
+        if described:
+            return f"{described} ", False
+
+        sha = _git(repo, "rev-parse", "--short", "HEAD")
+        return f"v{version}-{f'g{sha}' if sha else 'dev'} ", False
     except Exception:
         return "", True
 
