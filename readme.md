@@ -272,6 +272,8 @@ first_as_prime = true
 
 The limit order sits at the best price on its side. After each `limit_wait` window it moves to the best price if the market has left it by more than the spread, and stays otherwise. After `1 + limit_wait_retries` windows, whatever is still unfilled goes to a market order with `limit_market_fallback = true`; set it to `false` to never pay the spread: the order then keeps waiting at the best price until it fills.
 
+`hedge_delay = { min = "5s", max = "10s" }` opens the hedges a random pause after the prime account's entry instead of at the same moment. The position is unhedged during the pause; leave it unset to hedge at once.
+
 Before opening, the strategy estimates spread and available order-book depth for the planned size:
 
 ```toml

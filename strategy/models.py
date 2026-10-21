@@ -208,6 +208,7 @@ class TradeConfig(BaseModel):
     trade_duration: TimeRange
     trade_cooldown: TimeRange
     trade_parts: int = Field(1, ge=1, le=10)  # enter and exit in this many equal parts
+    hedge_delay: TimeRange | None = None  # pause between the lead and its hedges on entry
     trade_heartbeat: DurationSec = DurationSec("15s")
     position_roi_limit: float = Field(0.8, gt=0, lt=1)
     combined_roi_limit: float = Field(0.1, gt=0, lt=1)

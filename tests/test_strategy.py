@@ -182,6 +182,21 @@ async def test_market_opens_all_legs():
     assert rest.calls == ["market:BTC:ask:0.002"]
 
 
+async def test_hedges_follow_the_lead_after_hedge_delay(monkeypatch):
+    lead, rest = Client("lead"), Client("rest")
+    events: list[str] = []
+    lead.calls, rest.calls = events, events
+
+    async def sleep(sec: float) -> None:
+        events.append(f"sleep:{sec}")
+
+    monkeypatch.setattr("strategy.trade.asyncio.sleep", sleep)
+
+    await trade(lead, rest).open(make_cfg(use_limit=False, hedge_delay=[7, 7]))
+
+    assert events == ["market:BTC:bid:0.002", "sleep:7", "market:BTC:ask:0.002"]
+
+
 async def test_trade_pnl():
     lead, rest = Client("lead", price="55000"), Client("rest", price="45000")
     lead.positions_value = [position("BTC", "bid", "0.002")]

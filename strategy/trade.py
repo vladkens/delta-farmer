@@ -255,8 +255,15 @@ class DeltaTrade:
             order = await _fill_limit_order(clt, self.symbol, side, qty, cfg)
             if order is None:
                 raise RuntimeError(f"Limit order failed for {clt.name} on {self.symbol}")
+        elif cfg.hedge_delay:
+            clt, side, qty = self.lead.client, self.lead.side, self.lead.qty
+            await clt.market_order(self.symbol, side, qty)
+            logger.bind(account=clt.name).debug(f"Market {side} {qty} {self.symbol} filled")
 
-        legs = self.legs if not cfg.use_limit else self.rest
+        legs = self.rest if cfg.use_limit or cfg.hedge_delay else self.legs
+        if cfg.hedge_delay:  # opt-in: hedges follow the lead after a pause, unhedged meanwhile
+            await asyncio.sleep(cfg.hedge_delay.sample())
+
         vals = await asyncio.gather(
             *[leg.client.market_order(self.symbol, leg.side, leg.qty) for leg in legs]
         )

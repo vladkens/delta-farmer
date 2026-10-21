@@ -13,6 +13,7 @@ trade_size_usd = { min = 140, max = 160 }       # Total size in USD at the lever
 trade_duration  = { min = "15m", max = "20m" }  # How long to hold positions
 trade_cooldown  = { min = "3m",  max = "6m"  }  # Pause between trades
 # trade_parts = 4                               # Enter and exit in equal parts (see README)
+# hedge_delay = { min = "5s", max = "10s" }     # Pause before hedging the prime entry (see README)
 
 # Exchange balance management (Omni and Lighter)
 # balance_target = 310
