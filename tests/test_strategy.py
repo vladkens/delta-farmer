@@ -571,3 +571,8 @@ async def test_shutdown_with_failed_cleanup_reports_open_positions(monkeypatch):
     await strategy.run()
 
     error.assert_called_once_with("Shutdown cleanup incomplete; close positions manually")
+
+
+def test_cfg_allows_50x_leverage():
+    # Omni lists DXI swaps at up to 50x.
+    assert make_cfg(leverage=50).leverage == 50
