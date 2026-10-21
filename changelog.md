@@ -1,3 +1,33 @@
+## v0.11.0 – 2026-10-21
+
+### Features
+
+- Added `trade_parts` to enter and exit positions in several equal parts; every part stays delta-neutral, and a trade uses fewer parts when a part would fall below the exchange minimum.
+- Added an optional `hedge_delay` that opens the hedges a random pause after the prime account's entry.
+- Added `stats` for Lighter with weekly or daily volume, fees, and burn.
+- Extended Ethereal `claim` to unwrap WUSDe rewards to USDe and bridge them to USDC on another network after a quote review.
+
+### Fixes
+
+- Fixed Omni login after Variational changed its sign-in flow.
+- Fixed limit orders waiting behind the market: they now move to the best price when the market leaves them by more than the spread, and with `limit_market_fallback = false` they keep waiting at the best price instead of failing the cycle.
+- Fixed trading on markets with trading hours: positions are held through closures and closed after the market reopens, and `market_hours = "strict"` follows Omni's trading sessions.
+- Fixed a failed cleanup, such as one on a closed market, letting the next trade open on top of positions that were still open; cleanup now retries before trading again.
+- Fixed a position flipped to the opposite side not being detected as drift.
+- Fixed an encrypted Omni `captcha_key` being sent to the captcha solver still encrypted.
+- Fixed configs with `leverage = 50` being rejected.
+- Fixed lowercase tickers in configs not matching exchange markets.
+- Fixed N1 burn by calculating it from position history.
+- Fixed HyENA burn to include trading fees.
+
+### Improvements
+
+- The version banner shows the commits since the last release, e.g. `v0.10.1-15-g6fb8e7b`.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.10.1...v0.11.0
+
+---
+
 ## v0.10.1 – 2026-09-26
 
 ### Fixes
