@@ -1,5 +1,13 @@
 Delta Farmer opens delta-neutral perpetual positions across exchanges to generate volume and maintain open interest for incentive-program points at minimal cost.
 
+## Context
+
+- The perp DEXs farmed here usually have thin order books, little organic volume and no committed market makers. The bot is not a market maker: it holds delta-neutral positions to earn points and pays as little spread, fees and funding as possible.
+- Treat missing liquidity as normal. A limit order of a few thousand dollars can take 10–20 minutes to fill, and an hour at night; cross the spread only when the configuration allows it (`limit_market_fallback`).
+- Exchanges reject orders below a minimum size, usually $10 and $100 on some (Nado). Size every order, part and remainder against `get_min_trade_usd` before sending it; a split that would go below it trades in fewer parts.
+- Do not assume an exchange is fast. Before shortening a wait, adding a timeout or abort, or removing a wait, retry or delay, state which real exchange behaviour makes it safe; otherwise keep it.
+- Exchange engines cannot be run locally and their APIs differ in how they report fills, cancels and positions. Keep changes to order execution (`strategy/execution.py`, `strategy/trade.py`, `strategy/cycle.py` and the order methods in `clients/`) minimal, and reason about each changed path against every client's actual behaviour before committing.
+
 ## Code organization
 
 - Keep `apps/<exchange>.py` thin and disposable. They may dispatch commands, render output, and own app-specific concerns such as trade-history caching; move reusable logic and shared data elsewhere.
@@ -24,6 +32,10 @@ Delta Farmer opens delta-neutral perpetual positions across exchanges to generat
 - Never place a replacement or fallback order while the previous order's final state is unknown.
 - Test deterministic business rules and safety regressions. Do not freeze mutable third-party API shapes or authentication flows in mocks.
 - Never run live `trade`, `close`, `deposit`, `withdraw`, forced login, claim, or migration commands unless the user explicitly requests that operation.
+
+## Workflow
+
+- Land each feature or fix on `main` as one commit; this project does not use pull requests.
 
 ## Supporter subscription
 

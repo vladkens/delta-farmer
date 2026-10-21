@@ -39,7 +39,7 @@ packages = ["apps", "clients", "strategy", "lib", "scripts"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"
-norecursedirs = ["gateway"]
+norecursedirs = ["gateway", ".worktrees"]
 filterwarnings = ["ignore::DeprecationWarning:websockets"]
 
 [tool.uv]

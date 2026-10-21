@@ -40,6 +40,8 @@ class ScriptedClient:
         self.limit_requests: list[tuple[Side, Decimal, Decimal, bool]] = []
         self.market_requests: list[tuple[Side, Decimal, bool]] = []
         self.canceled: list[str] = []
+        self.cancel_takes = True  # False: the exchange keeps the order open after a cancel
+        self.fill_on_cancel = Decimal(0)  # a fill that lands while the cancel is in flight
 
     async def get_tick_size(self, symbol: str) -> Decimal:
         return Decimal(1)
@@ -81,7 +83,12 @@ class ScriptedClient:
 
     async def cancel_order(self, order: Order) -> bool:
         self.canceled.append(order.id)
-        return True
+        if self.cancel_takes:
+            current = self.orders[order.id]
+            filled = max(current.filled, self.fill_on_cancel)
+            update = {"status": OrderStatus.CANCELED, "filled": filled}
+            self.orders[order.id] = current.model_copy(update=update)
+        return self.cancel_takes
 
     async def market_order(self, symbol: str, side: Side, qty: Decimal, reduce_only=False) -> Order:
         self.market_requests.append((side, qty, bool(reduce_only)))
@@ -121,120 +128,158 @@ def entry_cfg(spread: str | None, wait=1) -> StrategyConfig:
     )
 
 
-async def test_limit_reprices(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
+class Clock:
+    """Fake time for the limit loop: sleeping advances it instantly."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, sec: float) -> None:
+        self.now += sec
+
+
+@pytest.fixture
+def clock(monkeypatch) -> Clock:
+    fake = Clock()
+    monkeypatch.setattr("strategy.execution.time", SimpleNamespace(time=fake.time))
+    monkeypatch.setattr("strategy.execution.asyncio.sleep", fake.sleep)
+    return fake
+
+
+async def test_limit_follows_market_that_left(clock):
     qty = Decimal("0.002")
     client = ScriptedClient(
-        [("49999", "50001"), ("49860", "50140")],
-        {
-            "order-1": [Poll()],
-            "order-2": [Poll(OrderStatus.FILLED, qty)],
-        },
+        [("49999", "50001"), ("50010", "50012")],  # best bid moves 11 up, spread is 2
+        {"order-2": [Poll(OrderStatus.FILLED, qty)]},
     )
 
-    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=0, max_wait_retries=1)
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=40)
 
     assert result is not None and result.id == "order-2"
-    assert [request[2] for request in client.limit_requests] == [
-        Decimal(49999),
-        Decimal(49860),
-    ]
+    assert [request[2] for request in client.limit_requests] == [Decimal(49999), Decimal(50010)]
     assert client.canceled == ["order-1"]
     assert client.market_requests == []
 
 
-async def test_limit_reprices_remainder(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
+async def test_limit_stays_while_market_moves_within_spread(clock):
+    qty = Decimal("0.002")
+    client = ScriptedClient(
+        [("49999", "50001"), ("50000", "50002")],  # one tick away, inside the spread
+        {"order-1": [Poll()] * 20 + [Poll(OrderStatus.FILLED, qty)]},  # past the first window
+    )
+
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=40)
+
+    assert result is not None and result.id == "order-1"
+    assert len(client.limit_requests) == 1
+    assert client.canceled == []
+
+
+async def test_limit_moves_at_most_once_per_window(clock):
+    qty = Decimal("0.002")
+    runaway = [(str(50000 + 20 * i), str(50002 + 20 * i)) for i in range(100)]
+    client = ScriptedClient([("49999", "50001"), *runaway], {})
+
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=40, max_wait_retries=3)
+
+    assert result is not None and result.id == "market"
+    assert 2 <= len(client.limit_requests) <= 4  # 4 windows of 40s: at most one move each
+    assert client.market_requests == [("bid", qty, False)]
+
+
+async def test_limit_counts_fill_that_landed_during_cancel(clock):
     qty = Decimal("0.0020")
     partial = Decimal("0.0007")
     client = ScriptedClient(
-        [("49999", "50001"), ("49860", "50140")],
-        {
-            "order-1": [Poll(filled=partial)],
-            "order-2": [Poll(OrderStatus.FILLED, qty - partial)],
-        },
+        [("49999", "50001"), ("50010", "50012")],
+        {"order-2": [Poll(OrderStatus.FILLED, qty - partial)]},
     )
+    client.fill_on_cancel = partial  # never seen by a poll, only after the cancel
 
-    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=-1, max_wait_retries=1)
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=40)
 
     assert result is not None and result.id == "order-2"
     assert [request[1] for request in client.limit_requests] == [qty, qty - partial]
 
 
-@pytest.mark.parametrize("fallback", [False, True], ids=["off", "on"])
-async def test_limit_fallback(monkeypatch, fallback):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
+async def test_limit_timeout_goes_to_market(clock):
+    qty = Decimal("0.002")
+    client = ScriptedClient([("49999", "50001")], {})
+
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=4, max_wait_retries=0)
+
+    assert result is not None and result.id == "market"
+    assert client.market_requests == [("bid", qty, False)]
+    assert client.canceled == ["order-1"]
+    assert len(client.limit_requests) == 1
+
+
+async def test_limit_waits_every_window_before_market(clock):
+    # limit_wait 15s with 99 retries: about 25 minutes at the best price before paying the spread.
+    qty = Decimal("0.002")
+    client = ScriptedClient([("49999", "50001")], {})
+
+    await fill_limit_order(client, "BTC", "bid", qty, timeout=15, max_wait_retries=99)
+
+    assert clock.now - 1000 >= 15 * 100
+    assert client.market_requests == [("bid", qty, False)]
+
+
+async def test_limit_without_fallback_waits_for_liquidity(clock):
+    # No volume for far longer than limit_wait: never pay the spread, keep waiting at the best price.
     qty = Decimal("0.002")
     client = ScriptedClient(
-        [("49999", "50001"), ("49860", "50140"), ("49700", "50300")],
-        {"order-1": [Poll()], "order-2": [Poll()]},
+        [("49999", "50001")], {"order-1": [Poll()] * 200 + [Poll(OrderStatus.FILLED, qty)]}
     )
 
-    if fallback:
-        result = await fill_limit_order(
-            client,
-            "BTC",
-            "bid",
-            qty,
-            timeout=0,
-            use_market_fallback=True,
-            max_wait_retries=1,
-        )
-        assert result is not None and result.id == "market"
-        assert client.market_requests == [("bid", qty, False)]
-    else:
-        with pytest.raises(RuntimeError, match="no fallback"):
-            await fill_limit_order(
-                client,
-                "BTC",
-                "bid",
-                qty,
-                timeout=0,
-                use_market_fallback=False,
-                max_wait_retries=1,
-            )
-        assert client.market_requests == []
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=4, use_market_fallback=False)
 
-    assert client.canceled == ["order-1", "order-2"]
+    assert result is not None and result.id == "order-1"
+    assert clock.now - 1000 > 100 * 4
+    assert client.market_requests == []
+    assert client.canceled == []
 
 
-async def test_limit_keeps_reduce_only(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
+async def test_limit_timeout_sends_only_the_remainder(clock):
+    qty = Decimal("0.0020")
+    partial = Decimal("0.0005")
+    client = ScriptedClient([("49999", "50001")], {})
+    client.fill_on_cancel = partial  # reported only by the re-read after the timeout cancel
+
+    await fill_limit_order(client, "BTC", "bid", qty, timeout=4, max_wait_retries=0)
+
+    assert client.market_requests == [("bid", qty - partial, False)]
+
+
+async def test_limit_keeps_reduce_only(clock):
     qty = Decimal("0.002")
     client = ScriptedClient(
-        [("49999", "50001"), ("49860", "50140")],
-        {
-            "order-1": [Poll()],
-            "order-2": [Poll(OrderStatus.FILLED, qty)],
-        },
+        [("49999", "50001"), ("49988", "49990")],  # best ask moves 11 down, away from a sell
+        {"order-2": [Poll(OrderStatus.FILLED, qty)]},
     )
 
-    await fill_limit_order(
-        client,
-        "BTC",
-        "ask",
-        qty,
-        reduce_only=True,
-        timeout=0,
-        max_wait_retries=1,
-    )
+    await fill_limit_order(client, "BTC", "ask", qty, reduce_only=True, timeout=40)
 
-    assert [request[3] for request in client.limit_requests] == [True, True]
+    assert [(request[2], request[3]) for request in client.limit_requests] == [
+        (Decimal(50001), True),
+        (Decimal(49990), True),
+    ]
 
 
-async def test_limit_unknown(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
-    client = ScriptedClient([("49999", "50001")], {"order-1": [None]})
+async def test_limit_unknown(clock):
+    client = ScriptedClient([("49999", "50001")], {"order-1": [None] * 10})
 
     with pytest.raises(AppError, match="unknown state"):
-        await fill_limit_order(client, "BTC", "bid", Decimal("0.002"), timeout=-1)
+        await fill_limit_order(client, "BTC", "bid", Decimal("0.002"), timeout=4)
 
     assert client.canceled == []
     assert client.market_requests == []
 
 
-async def test_limit_canceled(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
+async def test_limit_canceled(clock):
     client = ScriptedClient(
         [("49999", "50001")],
         {"order-1": [Poll(OrderStatus.CANCELED)]},
@@ -243,21 +288,6 @@ async def test_limit_canceled(monkeypatch):
     with pytest.raises(RuntimeError, match="canceled by exchange"):
         await fill_limit_order(client, "BTC", "bid", Decimal("0.002"))
 
-    assert client.market_requests == []
-
-
-async def test_limit_waits_on_stable_bbo(monkeypatch):
-    monkeypatch.setattr("strategy.execution.asyncio.sleep", instant_sleep)
-    qty = Decimal("0.002")
-    client = ScriptedClient(
-        [("49999", "50001"), ("49999", "50001")],
-        {"order-1": [Poll(), Poll(OrderStatus.FILLED, qty)]},
-    )
-
-    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=0, max_wait_retries=1)
-
-    assert result is not None and result.status == OrderStatus.FILLED
-    assert client.canceled == []
     assert client.market_requests == []
 
 
@@ -348,3 +378,28 @@ async def test_entry_gate_estimator():
 
     assert quality is not None and quality.entry_spread_pct == Decimal(2)
     assert client.calls == 1
+
+
+async def test_limit_never_replaces_an_order_still_open_after_cancel(clock):
+    # The cancel did not take: placing the new price now could fill twice.
+    client = ScriptedClient([("49999", "50001"), ("50010", "50012")], {"order-1": [Poll()]})
+    client.cancel_takes = False
+
+    with pytest.raises(AppError, match="still open after cancel"):
+        await fill_limit_order(client, "BTC", "bid", Decimal("0.002"), timeout=40)
+
+    assert len(client.limit_requests) == 1
+    assert client.market_requests == []
+
+
+async def test_limit_visibility_is_timed_from_the_latest_placement(clock):
+    # A long wait without fallback, then a move: a brief index lag on the new order is fine.
+    qty = Decimal("0.002")
+    client = ScriptedClient(
+        [("49999", "50001"), *[("49999", "50001")] * 60, ("50010", "50012")],
+        {"order-2": [None, Poll(OrderStatus.FILLED, qty)]},
+    )
+
+    result = await fill_limit_order(client, "BTC", "bid", qty, timeout=4, use_market_fallback=False)
+
+    assert result is not None and result.id == "order-2"

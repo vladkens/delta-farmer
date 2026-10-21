@@ -270,7 +270,7 @@ limit_market_fallback = true
 first_as_prime = true
 ```
 
-`limit_wait_retries` adds another wait window while the best price remains near the original limit. If the order still does not fill, `limit_market_fallback = true` permits a market order; set it to `false` to abort the cycle instead.
+The limit order sits at the best price on its side. After each `limit_wait` window it moves to the best price if the market has left it by more than the spread, and stays otherwise. After `1 + limit_wait_retries` windows, whatever is still unfilled goes to a market order with `limit_market_fallback = true`; set it to `false` to never pay the spread: the order then keeps waiting at the best price until it fills.
 
 Before opening, the strategy estimates spread and available order-book depth for the planned size:
 
