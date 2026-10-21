@@ -8,10 +8,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 
 from clients.omni import OmniClient, OmniCompetitionStatus, OmniPoint
 from lib.cli import create_cli, run_app, setup_app
+from lib.crypto import decrypt_value, is_encrypted
 from lib.errors import AppError
 from lib.http import ApiError
 from lib.store import DataStore
@@ -25,6 +26,11 @@ from strategy.withdrawal import run_withdrawals
 
 class OmniConfig(DepositConfig):
     captcha_key: SecretStr = Field(default=SecretStr(""), repr=False)
+
+    @field_validator("captcha_key", mode="before")
+    @classmethod
+    def decrypt_captcha_key(cls, v: str) -> str:
+        return decrypt_value(v) if is_encrypted(v) else v
 
     @classmethod
     def load(cls, filepath: str) -> Self:
