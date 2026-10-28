@@ -3,7 +3,7 @@
 import asyncio
 import random
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -94,7 +94,7 @@ class RepeatErrorGuard:
         self.last_error_count = 0
 
     @contextmanager
-    def __call__(self) -> Iterator[None]:
+    def __call__(self) -> Generator[None]:
         try:
             yield
             self.last_error_key = None
