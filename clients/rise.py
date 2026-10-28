@@ -333,8 +333,8 @@ class RiseClient:
         self._rpc_id = 0
         self._order_markets: dict[str, int] = {}
         self._order_resting_ids: dict[str, str] = {}
-        self._points_token: str | None = None
-        self._points_token_expires_at = 0.0
+        self._auth_jwt: str | None = None
+        self._auth_jwt_expires_at = 0.0
 
     async def _call(self, method: HttpMethod, path: str, **kwargs):
         rep = await self.http.request(method, path, **kwargs)
@@ -444,7 +444,7 @@ class RiseClient:
     # MARK: Lifecycle
 
     async def registered(self) -> bool:
-        data = await self._call("GET", f"/api/v1/invite/account/{self.address}")
+        data = await self._call("GET", f"/api/v1/invite/check/{self.address}")
         return bool(data.get("has_access")) and data.get("status") == "ACTIVE"
 
     @locked
@@ -454,7 +454,7 @@ class RiseClient:
             self.http.clear_cookies()
             self.rpc.clear_cookies()
 
-        signers = await self._call("GET", "/api/v1/auth/signers", params={"account": self.address})
+        signers = await self._auth_call("/api/v1/auth/signers", params={"account": self.address})
         for s in signers.get("signers", []):
             if s.get("signer", "").lower() == self.signer_address.lower():
                 return
@@ -881,10 +881,10 @@ class RiseClient:
             return RiseVolumeStats()
 
     @locked
-    async def _points_login(self, *, force: bool = False) -> str:
+    async def _auth_token(self, *, force: bool = False) -> str:
         now = time.time()
-        if not force and self._points_token and now < self._points_token_expires_at - 10:
-            return self._points_token
+        if not force and self._auth_jwt and now < self._auth_jwt_expires_at - 10:
+            return self._auth_jwt
 
         data = await self._call("GET", "/api/v1/auth/nonce", params={"account": self.address})
         nonce = str(data["nonce"]).removeprefix("0x")
@@ -910,37 +910,37 @@ class RiseClient:
             },
         )
         if not rep.ok:
-            raise ApiError("Points login failed", rep)
+            raise ApiError("JWT login failed", rep)
         payload = rep.json()
         auth = payload.get("data", payload)
         token = auth.get("access_token")
         if not token:
-            raise ApiError("Points login returned no access token")
-        self._points_token = str(token)
-        self._points_token_expires_at = now + int(auth.get("expires_in", 300))
-        return self._points_token
+            raise ApiError("JWT login returned no access token")
+        self._auth_jwt = str(token)
+        self._auth_jwt_expires_at = now + int(auth.get("expires_in", 300))
+        return self._auth_jwt
 
-    async def _points_call(self, path: str) -> dict:
+    async def _auth_call(self, path: str, **kwargs) -> dict:
         async def request(*, force_login: bool):
-            token = await self._points_login(force=force_login)
+            token = await self._auth_token(force=force_login)
             return await self.http.request(
-                "GET", path, headers={"Authorization": f"Bearer {token}"}
+                "GET", path, headers={"Authorization": f"Bearer {token}"}, **kwargs
             )
 
         rep = await request(force_login=False)
         if rep.status_code == 401:
             rep = await request(force_login=True)
         if not rep.ok:
-            raise ApiError("Points API error", rep)
+            raise ApiError("API error", rep)
         payload = rep.json()
         return payload.get("data", payload)
 
     async def points_total(self) -> RisePointsInfo:
-        data = await self._points_call(f"/api/v1/points/{self.address}")
+        data = await self._auth_call(f"/api/v1/points/{self.address}")
         return RisePointsInfo.model_validate(data)
 
     async def points_history(self) -> list[RisePoint]:
-        data = await self._points_call(f"/api/v1/points/{self.address}/history")
+        data = await self._auth_call(f"/api/v1/points/{self.address}/history")
         points = []
         for entry in data.get("entries", []):
             epoch = entry.get("epoch", {})
