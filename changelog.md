@@ -1,3 +1,13 @@
+## v0.11.1 – 2026-10-28
+
+### Fixes
+
+- Fixed Rise commands failing with "JWT authentication required" after Rise began requiring sign-in for account requests.
+
+**Full Changelog**: https://github.com/vladkens/delta-farmer/compare/v0.11.0...v0.11.1
+
+---
+
 ## v0.11.0 – 2026-10-21
 
 ### Features
