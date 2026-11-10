@@ -168,7 +168,11 @@ async def _check_symbols(cfg: TradeConfig, accs: Sequence[TradingClient]) -> Non
     ]
 
     async def symbol_exists(acc: TradingClient, symbol: str) -> bool:
-        await acc.get_lot_size(symbol)
+        # The market list needs no quote, so markets closed for their trading hours pass too.
+        if symbol in await acc.get_symbols():
+            return True
+
+        await acc.get_lot_size(symbol)  # symbols a client resolves without listing them
         return True
 
     await ensure_exchange_symbols(accs, symbols, symbol_exists)

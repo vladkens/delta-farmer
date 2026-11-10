@@ -19,7 +19,7 @@ from strategy.models import (
     StrategyConfig,
     TradingClient,
 )
-from strategy.runner import _check_cfg, _check_symbols
+from strategy.runner import _check_cfg, _check_symbols, _prepare_groups
 from strategy.trade import DeltaLeg, DeltaTrade, DeltaTradeSummary
 
 
@@ -336,7 +336,6 @@ async def test_limit_close(monkeypatch):
 async def test_symbol_case_preserves_position_monitoring_and_closure(configured, canonical):
     lead, rest = Client("lead"), Client("rest")
     lead.get_symbols = AsyncMock(return_value=[canonical])
-    lead.get_lot_size = AsyncMock(return_value=Decimal("0.001"))
     lead.positions_value = [position(canonical, "bid", "0.002")]
     rest.positions_value = [position(canonical, "ask", "0.002")]
     cfg = make_cfg(symbols=[configured])
@@ -347,7 +346,6 @@ async def test_symbol_case_preserves_position_monitoring_and_closure(configured,
     summary = await active.state(cfg)
     await active.close(cfg)
 
-    lead.get_lot_size.assert_awaited_once_with(canonical)
     assert summary.healthy is True
     assert summary.open_leg_count == 2
     assert lead.calls == [f"market:{canonical}:bid:0.002", f"close:{canonical}"]
@@ -360,6 +358,9 @@ async def test_symbols_once_per_exchange():
             super().__init__(name)
             self.exchange = exchange
             self.symbols: list[str] = []
+
+        async def get_symbols(self) -> list[str]:
+            return []  # unlisted, so every check reaches the lot-size lookup
 
         async def get_lot_size(self, symbol: str) -> Decimal:
             self.symbols.append(symbol)
@@ -390,6 +391,58 @@ async def test_symbols_reject_exchange():
 
     with pytest.raises(AppError, match="ETH is not available on second"):
         await _check_symbols(make_cfg(symbols=["BTC", "ETH"]), clients)
+
+
+class ClosedMarketClient(Client):
+    """Omni over a weekend: the swaps stay listed, but nothing quotes until the market reopens."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.tradeable = False
+
+    async def registered(self) -> bool:
+        return True
+
+    async def get_symbols(self) -> list[str]:
+        return ["US500S", "XAUS"]
+
+    async def get_price(self, symbol: str) -> Decimal:
+        raise RuntimeError("Market is not open for trading")
+
+    async def get_bbo(self, symbol: str) -> tuple[Decimal, Decimal]:
+        raise RuntimeError("Market is not open for trading")
+
+    async def get_order_book(self, symbol: str) -> OrderBook:
+        raise RuntimeError("Market is not open for trading")
+
+    async def get_lot_size(self, symbol: str) -> Decimal:
+        raise RuntimeError("Market is not open for trading")
+
+
+async def test_closed_market_starts_and_waits(monkeypatch):
+    accounts = [ClosedMarketClient("prime"), ClosedMarketClient("hedge")]
+    clients = cast(list[TradingClient], accounts)
+    cfg = make_cfg(symbols=["us500s", "XAUS"], market_hours="strict")
+    warning = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.warning", warning)
+
+    await _prepare_groups(cfg, clients)
+    strategy = DeltaStrategy(cfg, clients)
+    strategy._wait = AsyncMock(side_effect=asyncio.CancelledError)  # stop at the first cooldown
+    await strategy.run()
+
+    assert cfg.symbols == ["US500S", "XAUS"]
+    warning.assert_called_once_with(
+        "Only 0/1 symbols are tradeable for the planned window; skipping cycle"
+    )
+    assert not [call for acc in accounts for call in acc.calls if call.startswith("market:")]
+
+
+async def test_closed_market_rejects_unknown_symbols():
+    clients = cast(list[TradingClient], [ClosedMarketClient("prime"), ClosedMarketClient("hedge")])
+
+    with pytest.raises(AppError, match="symbols: XAUSS is not available on mock$"):
+        await _check_symbols(make_cfg(symbols=["XAUS", "XAUSS"]), clients)
 
 
 def test_cfg_symbol_count():
