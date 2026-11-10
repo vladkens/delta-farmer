@@ -10,8 +10,6 @@ import glob
 from decimal import Decimal
 
 from apps.hyperliquid import HyperLiquidNativeClient
-from clients.ethereal import EtherealClient
-from clients.hyena import HyenaClient
 from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
@@ -20,8 +18,6 @@ from clients.rise import RiseClient
 from strategy import OrderBook, OrderBookLevel, StrategyConfig
 
 EXCHANGES = [
-    "ethereal",
-    "hyena",
     "hyperliquid",
     "nado",
     "omni",
@@ -59,8 +55,6 @@ def _format_spread(bid: Decimal, ask: Decimal) -> str:
 async def snapshot(exchange: str, config_path: str, levels: int) -> tuple[str, str]:
 
     client_map = {
-        "ethereal": EtherealClient,
-        "hyena": HyenaClient,
         "hyperliquid": HyperLiquidNativeClient,
         "nado": NadoClient,
         "omni": OmniClient,

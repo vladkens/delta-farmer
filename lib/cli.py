@@ -54,15 +54,6 @@ def eprint(*args, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
 
 
-def print_deprecation_notice(message: str) -> None:
-    eprint()
-    console.print(
-        f"!! DEPRECATED CLIENT: {message}",
-        style="bold orange3",
-        highlight=False,
-    )
-
-
 def noop_command(exchange: str, command: str) -> None:
     raise AppError(
         f"{command.capitalize()} is not implemented for {exchange}. "

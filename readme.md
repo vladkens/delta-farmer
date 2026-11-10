@@ -54,7 +54,7 @@ Each exchange has a launcher under `apps/`. Use the launcher name as `<app>` in 
 | `pacifica` | [Pacifica](https://app.pacifica.fi?referral=uid127)               | Solana | —                  | —                             |
 | `rise`     | [RISE](https://www.rise.trade/)                                   | EVM    | —                  | —                             |
 
-Delta-farmer previously supported Ethereal and HyENA, but both projects have since closed.
+Delta-farmer previously supported Ethereal and HyENA. Both projects have closed and their launchers were removed; `scripts/weekly.py` still includes their cached history.
 
 ## Installation
 

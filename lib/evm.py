@@ -131,15 +131,6 @@ HYPEREVM = EvmNetwork(
         "USDT": EvmToken("USDT", "0xb8ce59fc3717ada4c02eadf9682a9e934f625ebb", 6),
     },
 )
-ETHEREAL = EvmNetwork(
-    name="ethereal",
-    chain_id=5_064_014,
-    rpc_url="https://rpc.ethereal.trade",
-    explorer_url="https://explorer.ethereal.trade",
-    native_token=EvmToken("USDe", ZERO_ADDRESS, 18),
-    short_name="ETHE",
-    stables={},
-)
 
 EVM_NETWORKS = {
     network.code: network
@@ -151,7 +142,6 @@ EVM_NETWORKS = {
         ARBITRUM,
         ROBINHOOD,
         HYPEREVM,
-        ETHEREAL,
     )
 }
 
@@ -318,33 +308,6 @@ async def get_evm_balances(
         balances[token] = Decimal(value).scaleb(-token.decimals)
 
     return balances
-
-
-async def get_usdc_destination(owner: str, proxy: str | None = None) -> EvmNetwork:
-    networks = [network for network in EVM_NETWORKS.values() if "USDC" in network.stables]
-    results = await asyncio.gather(
-        *(
-            get_evm_balances(network, owner, tuple(network.stables.values()), proxy)
-            for network in networks
-        ),
-        return_exceptions=True,
-    )
-    balances: list[tuple[EvmNetwork, Decimal]] = []
-    for network, result in zip(networks, results, strict=True):
-        if isinstance(result, BaseException):
-            if not isinstance(result, Exception):
-                raise result
-            logger.warning(f"{network.name.title()} balances unavailable: {result}")
-            continue
-
-        balances.append((network, sum(result.values(), Decimal(0))))
-
-    if not balances:
-        raise ApiError("No destination balances available for the USDC bridge")
-
-    # Prefer Arbitrum when balances are equal, including an empty wallet.
-    network, _balance = max(balances, key=lambda row: (row[1], row[0] == ARBITRUM))
-    return network
 
 
 async def dynamic_fee_params(rpc: RPC) -> dict:

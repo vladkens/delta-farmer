@@ -2,16 +2,15 @@
 """Weekly trading report — reads from local cache (.cache/).
 
 To refresh data for an exchange, run its stats command first:
-  uv run apps/hyena.py stats
   uv run apps/nado.py stats
   ... (same for other exchanges)
 
 Usage:
   uv run scripts/weekly.py              # snapshot: all exchanges, latest week
   uv run scripts/weekly.py -1           # snapshot: one week back
-  uv run scripts/weekly.py Hyena        # Hyena: all periods (vol/burn/pts)
-  uv run scripts/weekly.py Hyena 0      # Hyena: latest week
-  uv run scripts/weekly.py -e Hyena     # legacy alias for Hyena
+  uv run scripts/weekly.py Nado         # Nado: all periods (vol/burn/pts)
+  uv run scripts/weekly.py Nado 0       # Nado: latest week
+  uv run scripts/weekly.py -e Nado      # legacy alias for Nado
   uv run scripts/weekly.py --bonus      # include OFF/retro bonus points in totals
   uv run scripts/weekly.py --burn       # burn pivot: all exchanges × ISO weeks
 """
@@ -26,16 +25,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from clients.ethereal import EtherealClient
-from clients.hyena import HyenaClient, HyenaHistoryItem
 from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
 from clients.pacifica import PacificaClient
 from clients.rise import RiseClient
 from lib.table import AutoTable, Column
+from lib.utils import to_period_week
 
 CACHE = os.path.join(os.path.dirname(__file__), "..", ".cache")
+
+# Closed exchanges: their clients are removed, but cached history still counts.
+ETHEREAL_GENESIS = datetime(2025, 12, 18, tzinfo=UTC)
+HYENA_GENESIS = datetime(2025, 12, 4, tzinfo=UTC)
 
 
 # MARK: Shared utils
@@ -68,6 +70,19 @@ def _to_iso_week(dt: datetime) -> str:
     return f"{iso.year}-W{iso.week:02d}"
 
 
+def ethereal_week(dt: datetime) -> str:
+    return to_period_week(dt, genesis=ETHEREAL_GENESIS)
+
+
+def hyena_week(dt: datetime) -> str:
+    return to_period_week(dt, genesis=HYENA_GENESIS)
+
+
+def hyena_reward_start(r: dict) -> datetime:
+    n = int(r["id"].removeprefix("reward-week-"))  # "reward-week-6"
+    return HYENA_GENESIS + timedelta(weeks=n - 1)
+
+
 # MARK: Stats extractors (vol + burn, native periods)
 
 Stats = dict[str, tuple[Decimal, Decimal]]  # {period_label: (vol, burn)}
@@ -78,7 +93,7 @@ def ethereal_stats() -> Stats:
     out: Stats = {}
     for path in glob_cache("ethereal_", "_trades.pkl"):
         for r in load_pkl(path):
-            lbl = EtherealClient.to_week_label(parse_dt(r["created_at"]))
+            lbl = ethereal_week(parse_dt(r["created_at"]))
             vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
             vol += Decimal(str(r["total_inc"])) + Decimal(str(r["total_dec"]))
             pnl = (
@@ -160,7 +175,7 @@ def hyena_stats() -> Stats:
             if not r.get("coin", "").startswith("hyna:"):
                 continue
             dt = datetime.fromtimestamp(r["time"] / 1000, tz=UTC)
-            lbl = HyenaClient.to_week_label(dt)
+            lbl = hyena_week(dt)
             vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
             vol += Decimal(str(r["px"])) * Decimal(str(r["sz"]))
             pnl = Decimal(str(r.get("closedPnl", 0))) - Decimal(str(r["fee"]))
@@ -198,7 +213,7 @@ def ethereal_pts() -> Pts:
         "_points.pkl",
         "started_at",
         ["points", "referral_points"],
-        EtherealClient.to_week_label,
+        ethereal_week,
     )
 
 
@@ -291,11 +306,7 @@ def hyena_burn_weeks() -> ISOData:
             out[w][1] += Decimal(str(r["fee"])) - Decimal(str(r.get("closedPnl", 0)))
     for path in glob_cache("hyena_", "_rewards.pkl"):
         for r in load_pkl(path):
-            dt = (
-                parse_dt(r["start_window"])
-                if "start_window" in r
-                else HyenaHistoryItem(**r).start_window
-            )
+            dt = parse_dt(r["start_window"]) if "start_window" in r else hyena_reward_start(r)
             out[_to_iso_week(dt)][2] += Decimal(str(r.get("enaxPoints", 0)))
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
 
@@ -382,7 +393,7 @@ def n1_burn_weeks() -> ISOData:
 # current_period_fn=callable → no pts, filter out current/incomplete period
 EXCHANGES: list[tuple[str, Any, Any, Any | None]] = [
     ("Ethereal", ethereal_stats, ethereal_pts, None),
-    ("Hyena", hyena_stats, hyena_pts, HyenaClient.to_week_label),
+    ("Hyena", hyena_stats, hyena_pts, hyena_week),
     ("Nado", nado_stats, nado_pts, None),
     ("Omni", omni_stats, omni_pts, None),
     ("Pacifica", pacifica_stats, pacifica_pts, None),
@@ -750,7 +761,7 @@ def main() -> int:
         nargs="*",
         default=None,
         help=(
-            "exchange and/or week: Hyena; 0=latest; -N=N weeks back; "
+            "exchange and/or week: Nado; 0=latest; -N=N weeks back; "
             "W14/2026-W14=specific ISO week; omit=all time"
         ),
     )

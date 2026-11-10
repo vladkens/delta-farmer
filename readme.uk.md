@@ -54,7 +54,7 @@ Delta-farmer — це CLI-бот, який відкриває узгоджені
 | `pacifica`  | [Pacifica](https://app.pacifica.fi?referral=uid127)               | Solana   | —                      | —                                |
 | `rise`      | [RISE](https://www.rise.trade/)                                   | EVM      | —                      | —                                |
 
-Раніше delta-farmer підтримував Ethereal і HyENA, але обидва проєкти вже закрилися.
+Раніше delta-farmer підтримував Ethereal і HyENA. Обидва проєкти закрилися, і їхні застосунки видалено; `scripts/weekly.py` і далі враховує їхню історію з кешу.
 
 ## Встановлення
 

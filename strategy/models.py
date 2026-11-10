@@ -59,7 +59,6 @@ class ProfileInfo(BaseModel):
     points: Decimal
     ref_code: str | None = None
     rank: int | None = None
-    mode: str | None = None
 
 
 class OrderBookLevel(BaseModel):

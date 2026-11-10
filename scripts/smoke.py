@@ -234,8 +234,6 @@ async def smoke(client: TradingClient, symbol: str, size_usd: float) -> tuple[in
 async def main():
     parser = argparse.ArgumentParser(prog="smoke", description="Smoke test for exchange clients")
     exchanges = [
-        "ethereal",
-        "hyena",
         "hyperliquid",
         "lighter",
         "nado",
@@ -265,8 +263,6 @@ async def main():
         print(f"config   : {args.config} (auto)")
 
     from apps.hyperliquid import HyperLiquidNativeClient
-    from clients.ethereal import EtherealClient
-    from clients.hyena import HyenaClient
     from clients.lighter import LighterClient
     from clients.n1 import N1Client
     from clients.nado import NadoClient
@@ -276,8 +272,6 @@ async def main():
     from strategy import StrategyConfig
 
     CLIENT_MAP = {
-        "ethereal": EtherealClient,
-        "hyena": HyenaClient,
         "hyperliquid": HyperLiquidNativeClient,
         "lighter": LighterClient,
         "nado": NadoClient,
@@ -305,7 +299,7 @@ async def main():
             "pick a different symbol to avoid conflicting with the running bot"
         )
     normalize = getattr(client, "_coin", lambda s: s)
-    symbol = normalize(args.symbol)  # normalize: "ETH" → "hyna:ETH" etc.
+    symbol = normalize(args.symbol)  # normalize: "ETH" → "xyz:ETH" etc.
 
     print(f"exchange : {args.exchange}")
     print(f"account  : {acc_cfg.name}")

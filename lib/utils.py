@@ -365,20 +365,6 @@ def find_safe_pair(bals: list[tuple[str, float]], size_usd: float, leverage: int
     return [(na, round_to_tick_size(sz, tick_size)) for na, sz in zip(names, sizes)]
 
 
-# MARK: Ethereal-specific utils
-
-
-def parse_signature_type(value: str) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    for part in value.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        ftype, fname = part.rsplit(" ", 1)
-        out.append({"name": fname, "type": ftype})
-    return out
-
-
 # MARK: Key parsing
 
 
