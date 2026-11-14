@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from lib.errors import AppError
+from lib.http import ApiError
 from strategy.cycle import Balances, DeltaStrategy
 from strategy.execution import close_all
 from strategy.models import (
@@ -20,9 +21,10 @@ from strategy.models import (
     Side,
     StrategyConfig,
     TradingClient,
+    usd_to_qty,
 )
 from strategy.runner import _check_cfg, _check_symbols, _prepare_groups, print_positions
-from strategy.trade import DeltaLeg, DeltaTrade, DeltaTradeSummary
+from strategy.trade import DeltaLeg, DeltaTrade, DeltaTradeSummary, basket_lot_size
 
 
 def make_cfg(**values) -> StrategyConfig:
@@ -146,6 +148,31 @@ def trade(lead: Client, rest: Client, symbol: str = "BTC") -> DeltaTrade:
         DeltaLeg(cast(TradingClient, lead), "bid", Decimal(100), qty=Decimal("0.002")),
         [DeltaLeg(cast(TradingClient, rest), "ask", Decimal(100), qty=Decimal("0.002"))],
     )
+
+
+def basket(clients: list[Client], sizes: list[str]) -> DeltaTrade:
+    """A lead bid against one or more ask hedges, as plan_delta_trades lays them out."""
+    sides: list[Side] = ["bid"] + ["ask"] * (len(clients) - 1)
+    legs = [
+        DeltaLeg(cast(TradingClient, client), side, Decimal(size))
+        for client, side, size in zip(clients, sides, sizes, strict=True)
+    ]
+    return DeltaTrade("BTC", legs[0], legs[1:])
+
+
+def lead_sized_qtys(sides: list[Side], sizes: list[str], price: str, lot: str) -> list[Decimal]:
+    """Sizing as it was before Task 4: the lead's price and lot applied to every leg."""
+    qtys = [usd_to_qty(Decimal(size), Decimal(price), Decimal(lot)) for size in sizes]
+    bid = sum(qty for qty, side in zip(qtys, sides) if side == "bid")
+    ask = sum(qty for qty, side in zip(qtys, sides) if side == "ask")
+    delta = bid - ask
+    if delta:
+        larger: Side = "bid" if delta > 0 else "ask"
+        last = max(i for i, side in enumerate(sides) if side == larger)
+        if abs(delta) < qtys[last]:
+            qtys[last] -= abs(delta)
+
+    return qtys
 
 
 def test_pnl_mismatch_warns(monkeypatch):
@@ -313,12 +340,47 @@ async def test_venues_with_different_lots_size_on_the_coarsest():
     assert [leg.qty for leg in plan.legs] == [Decimal(500), Decimal(500)]
 
 
-async def test_venues_whose_lots_do_not_nest_are_refused():
-    rh, core = Client("rh", price="2", lot="0.5"), Client("core", price="2", lot="0.2")
-    core.exchange = "lighter_core"
+async def test_qtys_sized_per_leg_on_the_coarsest_lot():
+    # The price gap exaggerates the ~0.03% Lighter RH/Core basis, so lot rounding stays visible.
+    lead = Client("lead", price="100", lot="0.001")
+    rest = Client("rest", price="125", lot="0.1")
+    plan = basket([lead, rest], ["100", "100"])
 
-    with pytest.raises(RuntimeError, match="share no step"):
-        await xrp_pair(rh, core).load_qtys()
+    await plan.load_qtys()
+
+    assert plan.lot_size == Decimal("0.1")  # coarsest of the two venues, valid on both
+    assert plan.rest[0].qty == Decimal("0.8")  # 100 USD at its own price, not the lead's
+    assert plan.lead.qty == Decimal("0.8")  # basket nets to zero in base qty
+    assert all(leg.qty % plan.lot_size == 0 for leg in plan.legs)
+
+
+def test_basket_lot_meets_grids_that_reject_each_other():
+    # 0.2 and 0.5 reject each other's lot, but 1.0 is tradeable on both grids.
+    assert basket_lot_size([Decimal("0.5"), Decimal("0.2")]) == Decimal(1)
+
+
+async def test_qtys_reject_a_basket_that_rounds_to_zero():
+    lead = Client("lead", lot="0.5")
+    rest = Client("rest", lot="0.2")  # their common step is 1.0 BTC, far above a 100 USD leg
+
+    with pytest.raises(RuntimeError, match="size is too small to trade on lead, rest"):
+        await basket([lead, rest], ["100", "100"]).load_qtys()
+
+    assert lead.calls == [] and rest.calls == []  # refused while planning, before any order
+
+
+@pytest.mark.parametrize(
+    "sizes", [["1000", "1000"], ["1000", "500.37", "499.63"], ["250.05", "125.02", "125.03"]]
+)
+async def test_qtys_on_one_venue_match_lead_sizing(sizes: list[str]):
+    clients = [Client(f"acc{i}") for i in range(len(sizes))]  # one venue: one price, one lot
+    plan = basket(clients, sizes)
+
+    await plan.load_qtys()
+
+    sides: list[Side] = ["bid"] + ["ask"] * (len(sizes) - 1)
+    assert [leg.qty for leg in plan.legs] == lead_sized_qtys(sides, sizes, "50000", "0.001")
+    assert plan.lot_size == Decimal("0.001")
 
 
 async def test_limit_open(monkeypatch):
@@ -563,6 +625,101 @@ async def test_a_hedged_pair_on_one_venue_goes_stale_together(monkeypatch):
     warning.assert_called_once_with("lighter: no mark price for BTC: No quote for BTC on lighter")
 
 
+class AnyCaseVenueClient(VenueClient):
+    """A venue that accepts any casing, as N1 and Rise do by upper-casing the symbol first."""
+
+    async def get_lot_size(self, symbol: str) -> Decimal:
+        known = {s.casefold() for s in (*self.prices, *self.unlisted)}
+        if symbol.casefold() not in known:
+            raise RuntimeError(f"Unknown symbol {symbol} on {self.exchange}")
+
+        return self.lot
+
+
+async def test_symbols_listed_on_one_venue_only_fail_startup():
+    rh = VenueClient("rh1", "lighter", {"BTC": "100000"})
+    core = VenueClient("core1", "lighter_core", {"BTC": "100000", "DOGE": "0.25"})
+
+    with pytest.raises(
+        AppError, match=r"^Invalid configured symbols: DOGE is not available on lighter$"
+    ):
+        await _check_symbols(make_cfg(symbols=["btc", "doge"]), [rh, core])
+
+
+async def test_symbols_canonicalized_from_every_venue(monkeypatch):
+    # A market paused on one venue drops out of its get_symbols(), but its lot size still
+    # resolves, so the pool starts. One warning names the pairs that only the lot size resolved.
+    rh = VenueClient("rh1", "lighter", {"BTC": "100000"}, unlisted=("DOGE",))
+    core = VenueClient("core1", "lighter_core", {"BTC": "100000", "DOGE": "0.25"})
+    cfg = make_cfg(symbols=["btc", "doge"])
+    warning = Mock()
+    monkeypatch.setattr("strategy.runner.logger.warning", warning)
+
+    await _check_symbols(cfg, [rh, core])
+
+    assert cfg.symbols == ["BTC", "DOGE"]
+    warning.assert_called_once_with("Not listed as active, may be untradeable: lighter DOGE")
+
+
+async def test_configured_casing_is_rewritten_for_a_case_sensitive_venue():
+    # Both Lighter clients match case-sensitively; N1 and Rise accept any casing. A spelling that
+    # matches the forgiving venue verbatim must still be rewritten, or the strict one fails.
+    lighter = VenueClient("rh1", "lighter", {"BTC": "100000"})
+    n1 = AnyCaseVenueClient("n1a", "n1", {"btc": "100000"})
+    cfg = make_cfg(symbols=["btc"])
+
+    await _check_symbols(cfg, [lighter, n1])
+
+    assert cfg.symbols == ["BTC"]
+
+
+async def test_casefold_collision_keeps_the_first_listing():
+    # Lighter sorts get_symbols by 24h volume, so of two spellings the first is the busier market.
+    venue = VenueClient("rh1", "lighter", {"NVDA": "200", "nvda": "1"})
+    cfg = make_cfg(symbols=["Nvda"])
+
+    await _check_symbols(cfg, [venue])
+
+    assert cfg.symbols == ["NVDA"]
+
+
+async def test_a_name_every_venue_lists_is_kept_as_configured():
+    # Two markets that differ only by case: the configured one trades, not the busier namesake.
+    venue = VenueClient("rh1", "lighter", {"NVDA": "200", "nvda": "1"})
+    cfg = make_cfg(symbols=["nvda"])
+
+    await _check_symbols(cfg, [venue])
+
+    assert cfg.symbols == ["nvda"]
+
+
+async def test_one_casing_cannot_serve_two_case_sensitive_venues():
+    # Known limitation: cfg.symbols holds one string per market for the whole pool, so a market
+    # whose venues spell it differently cannot be expressed. Startup fails naming the venue that
+    # rejects the resolved name; no venue is picked silently.
+    rh = VenueClient("rh1", "lighter", {"NVDA": "200"})
+    core = VenueClient("core1", "lighter_core", {"nvda": "200"})
+
+    with pytest.raises(AppError, match="NVDA is not available on lighter_core"):
+        await _check_symbols(make_cfg(symbols=["nvda"]), [rh, core])
+
+
+async def test_listing_failure_fails_as_an_app_error():
+    class BrokenVenueClient(VenueClient):
+        async def get_symbols(self) -> list[str]:
+            raise ApiError("Cannot get markets: 429 rate limit exceeded")
+
+    rh = VenueClient("rh1", "lighter", {"BTC": "100000"})
+    core = BrokenVenueClient("core1", "lighter_core", {"BTC": "100000"})
+
+    with pytest.raises(
+        AppError, match=r"^Cannot list markets: lighter_core: Cannot get markets: 429 rate limit"
+    ):
+        await _check_symbols(make_cfg(symbols=["BTC"]), [rh, core])
+
+    assert rh.listing_calls == 1  # the sibling listing is awaited, not left orphaned
+
+
 class ClosedMarketClient(Client):
     """Omni over a weekend: the swaps stay listed, but nothing quotes until the market reopens."""
 
@@ -645,7 +802,7 @@ async def test_strict_market_window(monkeypatch):
     )
     monkeypatch.setattr("strategy.cycle.datetime", FrozenDateTime)
 
-    assert await strategy._tradeable_symbols(30) == []
+    assert await strategy._tradeable_symbols(30, Decimal(1000)) == []
     assert checked == [now + timedelta(seconds=5), now + timedelta(seconds=35)]
 
 

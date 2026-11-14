@@ -33,7 +33,8 @@ class EntryQuality:
     ask_depth: Decimal = Decimal(0)
 
     @property
-    def unavailable_reason(self) -> str | None:
+    def depth_reason(self) -> str | None:
+        """Set when a side has legs the book cannot fill; a bid leg eats asks and vice versa."""
         missing = []
         if self.bid_qty > 0 and self.avg_bid_price is None:
             missing.append(f"asks depth {self.ask_depth}/{self.bid_qty}")
@@ -41,6 +42,13 @@ class EntryQuality:
             missing.append(f"bids depth {self.bid_depth}/{self.ask_qty}")
         if missing:
             return "insufficient " + ", ".join(missing)
+        return None
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        reason = self.depth_reason
+        if reason is not None:
+            return reason
         if self.entry_spread_pct is None:
             return "spread unavailable"
         return None
@@ -74,6 +82,20 @@ def _simulate_book_fill(levels: list[OrderBookLevel], qty: Decimal) -> Decimal |
     return notional / filled if filled > 0 and filled == qty else None
 
 
+def _spread_pct(avg_bid_price: Decimal | None, avg_ask_price: Decimal | None) -> Decimal | None:
+    """Signed cost of entering both sides: how far the buy fill sits above the sell fill, in percent.
+
+    Negative means the basket is entered at a gain, and only two books can do that. Inside one book
+    the buy walks the asks and the sell walks the bids, so the buy fill is at least the best ask and
+    the sell fill at most the best bid: the cost there is always >= 0 and the sign never shows up.
+    Across books the basis can go either way, and a gain must pass the gate instead of blocking it.
+    """
+    if avg_bid_price is None or avg_ask_price is None or avg_ask_price <= 0:
+        return None
+
+    return (avg_bid_price - avg_ask_price) / avg_ask_price * 100
+
+
 def evaluate_entry_quality(
     order_book: OrderBook,
     legs: Sequence[tuple[Side, Decimal]],
@@ -85,11 +107,7 @@ def evaluate_entry_quality(
 
     avg_bid_price = _simulate_book_fill(order_book.asks, bid_qty) if bid_qty else None
     avg_ask_price = _simulate_book_fill(order_book.bids, ask_qty) if ask_qty else None
-    entry_spread_pct = (
-        abs(avg_ask_price - avg_bid_price) / avg_ask_price * 100
-        if avg_bid_price is not None and avg_ask_price is not None and avg_ask_price > 0
-        else None
-    )
+    entry_spread_pct = _spread_pct(avg_bid_price, avg_ask_price)
 
     return EntryQuality(
         avg_bid_price=avg_bid_price,
@@ -102,33 +120,183 @@ def evaluate_entry_quality(
     )
 
 
-async def wait_for_entry_quality(
-    client: TradingClient, symbol: str, legs: Sequence[tuple[Side, Decimal]], cfg: TradeConfig
+def _mean_price(side: Side, parts: Sequence[tuple[Decimal | None, Decimal]]) -> Decimal | None:
+    """Qty-weighted mean fill price of one side; None when a book cannot fill its own legs."""
+    legs: list[tuple[Decimal, Decimal]] = []
+    for price, qty in parts:
+        if qty <= 0:
+            if price is not None:
+                # A price with nothing to weight it with cannot be folded in, and dropping it
+                # would price the side off the remaining books and move the gate by any amount.
+                raise ValueError(f"entry quality has a {side} price {price} for {side} qty {qty}")
+
+            continue  # this book holds no legs on this side
+
+        if price is None:
+            return None  # that book is too thin, so the side has no price at all
+
+        legs.append((price, qty))
+
+    if not legs:
+        return None
+
+    if len(legs) == 1:
+        return legs[0][0]  # one book holds the whole side: its own price, no rounding
+
+    total = sum((qty for _, qty in legs), Decimal(0))
+    return sum((price * qty for price, qty in legs), Decimal(0)) / total
+
+
+def combine_entry_quality(parts: Sequence[EntryQuality]) -> EntryQuality:
+    """Fold per-book fills into one entry: each side's qty-weighted mean price across books.
+
+    The spread between the two means is what entering the whole basket costs, cross-venue basis
+    included.
+    """
+    if len(parts) == 1:
+        return parts[0]  # one book holds every leg: its own numbers, estimator spread included
+
+    avg_bid_price = _mean_price("bid", [(x.avg_bid_price, x.bid_qty) for x in parts])
+    avg_ask_price = _mean_price("ask", [(x.avg_ask_price, x.ask_qty) for x in parts])
+
+    return EntryQuality(
+        avg_bid_price=avg_bid_price,
+        avg_ask_price=avg_ask_price,
+        entry_spread_pct=_spread_pct(avg_bid_price, avg_ask_price),
+        bid_qty=sum((x.bid_qty for x in parts), Decimal(0)),
+        ask_qty=sum((x.ask_qty for x in parts), Decimal(0)),
+        bid_depth=sum((x.bid_depth for x in parts), Decimal(0)),
+        ask_depth=sum((x.ask_depth for x in parts), Decimal(0)),
+    )
+
+
+def _group_by_book(
+    legs: Sequence[tuple[TradingClient, Side, Decimal]],
+) -> list[tuple[TradingClient, list[tuple[Side, Decimal]]]]:
+    """Group legs by the order book they will hit, keeping first-seen order.
+
+    The book is the venue plus the symbol, and the symbol is fixed for one call, so the exchange id
+    is the whole key. Accounts on one exchange share its book and `DeltaTrade.open` sends their
+    legs into it at once, while every group is priced from the top of that book: a group per
+    account would count the best levels once per account and report a cost the orders never pay.
+    The first account of an exchange does the fetching, as `strategy/symbols.py` already does for
+    its per-exchange fan-out; the legs carry their own sides, which `unique_exchange_clients` would
+    drop, so the grouping is built here.
+    """
+    groups: dict[str, tuple[TradingClient, list[tuple[Side, Decimal]]]] = {}
+    for client, side, qty in legs:
+        _, items = groups.setdefault(client.exchange, (client, []))
+        items.append((side, qty))
+
+    return list(groups.values())
+
+
+async def _book_entry_quality(
+    client: TradingClient, symbol: str, legs: Sequence[tuple[Side, Decimal]]
+) -> EntryQuality:
+    if isinstance(client, EntryQualityEstimator):
+        return await client.estimate_entry_quality(symbol, legs)
+
+    return evaluate_entry_quality(await client.get_order_book(symbol), legs)
+
+
+def _unpriced(legs: Sequence[tuple[Side, Decimal]]) -> EntryQuality:
+    """A book that did not answer: its legs still count, with no price for either side."""
+    return EntryQuality(
+        avg_bid_price=None,
+        avg_ask_price=None,
+        entry_spread_pct=None,
+        bid_qty=sum((qty for side, qty in legs if side == "bid"), Decimal(0)),
+        ask_qty=sum((qty for side, qty in legs if side == "ask"), Decimal(0)),
+    )
+
+
+def error_detail(exc: BaseException) -> str:
+    """The API's own words, which is what an operator needs, or its type when it has none."""
+    return str(exc).strip() or type(exc).__name__
+
+
+@dataclass(frozen=True)
+class _BookFill:
+    """What one order book reported for its own legs, or why it reported nothing."""
+
+    client: TradingClient
+    quality: EntryQuality
+    error: str | None = None
+
+    @property
+    def reason(self) -> str | None:
+        return self.error or self.quality.depth_reason
+
+
+def _gate_reason(fills: Sequence[_BookFill], combined: EntryQuality) -> str | None:
+    """Name the venues that could not price their own legs; with one book nothing is named."""
+    short = [(x.client, reason) for x in fills if (reason := x.reason)]
+    if not short:
+        return combined.unavailable_reason
+
+    if len(fills) == 1:
+        return short[0][1]
+
+    return "; ".join(f"{client.exchange}: {reason}" for client, reason in short)
+
+
+async def wait_for_legs_entry_quality(
+    legs: Sequence[tuple[TradingClient, Side, Decimal]], symbol: str, cfg: TradeConfig
 ) -> EntryQuality | None:
+    """Wait until entering every leg on its own venue costs at most `max_entry_spread_pct`.
+
+    Legs are grouped per order book and each book simulates only the legs that will hit it, then
+    the groups combine into one quality, so legs split across venues are measured with the basis
+    between the books included. A book that fails to answer leaves its side unpriced, which keeps
+    the gate waiting instead of failing the cycle: nothing is open yet when the gate runs.
+    """
     if cfg.max_entry_spread_pct is None:
         return EntryQuality(None, None, None)
 
-    log = logger.bind(account=client.name)
+    groups = _group_by_book(legs)
+    log = logger.bind(account=groups[0][0].name) if groups else logger
     timeout = cfg.entry_gate_wait
     poll_interval = cfg.entry_gate_poll
     deadline = time.time() + timeout
     warned = False
-    last_quality: EntryQuality | None = None
+    reported: set[str] = set()
 
     def fmt(x: Decimal | None) -> str:
-        return f"{x:.2f}%" if x is not None else "n/a"
+        if x is None:
+            return "n/a"
 
-    def gate_msg(prefix: str, quality: EntryQuality) -> str:
-        reason = quality.unavailable_reason
+        return f"{x:.2f}%" if x >= 0 else f"{x:.2f}% (gain)"
+
+    def gate_msg(prefix: str, quality: EntryQuality, reason: str | None) -> str:
         detail = f" reason={reason}" if reason else ""
         return f"{symbol} gate {prefix} spread={fmt(quality.entry_spread_pct)}{detail}"
 
     while True:
-        if isinstance(client, EntryQualityEstimator):
-            quality = await client.estimate_entry_quality(symbol, legs)
-        else:
-            quality = evaluate_entry_quality(await client.get_order_book(symbol), legs)
-        last_quality = quality
+        results = await asyncio.gather(
+            *[_book_entry_quality(client, symbol, items) for client, items in groups],
+            return_exceptions=True,
+        )
+
+        fills: list[_BookFill] = []
+        for (client, items), result in zip(groups, results, strict=True):
+            if not isinstance(result, BaseException):
+                fills.append(_BookFill(client, result))
+                continue
+
+            if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                raise result
+
+            detail = error_detail(result)
+            fills.append(_BookFill(client, _unpriced(items), detail))
+            if client.exchange not in reported:  # once per book per gate, not once per poll
+                reported.add(client.exchange)
+                logger.bind(account=client.name).warning(
+                    f"{symbol} gate: book unavailable, {detail}"
+                )
+
+        quality = combine_entry_quality([x.quality for x in fills])
+        reason = _gate_reason(fills, quality)
         if (
             quality.entry_spread_pct is not None
             and quality.entry_spread_pct <= cfg.max_entry_spread_pct
@@ -136,16 +304,28 @@ async def wait_for_entry_quality(
             return quality
 
         if not warned:
-            log.debug(gate_msg("waiting", quality))
+            log.debug(gate_msg("waiting", quality, reason))
             warned = True
 
         remaining = deadline - time.time()
         if remaining <= 0:
-            msg = gate_msg("skip", last_quality) if last_quality else f"{symbol} gate skip"
-            log.debug(f"{msg} timeout={timeout:.0f}s")
+            # The one line that says this part, and with it the cycle, traded nothing. Once per
+            # gate call, not per poll: a pool whose entry cost never clears the cap would
+            # otherwise sit silent for days.
+            msg = gate_msg("skip", quality, reason)
+            log.info(f"{msg} timeout={timeout:.0f}s")
             return None
 
         await asyncio.sleep(min(poll_interval, remaining))
+
+
+async def wait_for_entry_quality(
+    client: TradingClient, symbol: str, legs: Sequence[tuple[Side, Decimal]], cfg: TradeConfig
+) -> EntryQuality | None:
+    """Single-client entry gate: every leg prices against this one client's book."""
+    return await wait_for_legs_entry_quality(
+        [(client, side, qty) for side, qty in legs], symbol, cfg
+    )
 
 
 # MARK: Limit order

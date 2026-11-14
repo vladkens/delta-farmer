@@ -23,7 +23,7 @@ from strategy.models import (
     TradingClient,
 )
 from strategy.runner import _run_groups
-from strategy.trade import DeltaLeg, DeltaTrade, split_qty
+from strategy.trade import DeltaLeg, DeltaTrade, basket_lot_size, split_qty
 
 PRICE = Decimal(100)
 
@@ -44,6 +44,9 @@ class SimClient:
         self.orders: list[tuple[str, Side, Decimal, bool]] = []
         self.min_trade_usd = Decimal(1)
         self.market_open = True
+        self.closed: set[str] = set()  # markets shut right now while the rest of them trade
+        self.lot_reads: list[str] = []
+        self.price_reads: list[str] = []
         self.attempts = 0
         self.fail: Callable[[int], bool] = lambda n: False  # fail the n-th order attempt
         self.leverage_set: list[int] = []
@@ -57,6 +60,8 @@ class SimClient:
             raise ApiError(f"order {n} rejected")
         if qty <= 0 or qty % self.lot:
             raise ApiError(f"qty {qty} is not a positive multiple of lot {self.lot}")
+        if not reduce_only and qty * PRICE < self.min_trade_usd:
+            raise ApiError(f"notional {qty * PRICE} under min {self.min_trade_usd}")
 
         held = self.pos.get(symbol, Decimal(0))
         signed = qty if side == "bid" else -qty
@@ -101,8 +106,12 @@ class SimClient:
     async def balance(self) -> Decimal:
         return Decimal(1000)
 
+    def _tradeable_now(self, symbol: str) -> bool:
+        return self.market_open and symbol not in self.closed
+
     async def get_price(self, symbol: str) -> Decimal:
-        if not self.market_open:  # like Omni: no quotes while the market is closed
+        self.price_reads.append(symbol)
+        if not self._tradeable_now(symbol):  # like Omni: no quotes while the market is closed
             raise ApiError("Market is not open for trading")
         return PRICE
 
@@ -110,6 +119,11 @@ class SimClient:
         return OrderBook.build(bids=[(PRICE - 1, 1000)], asks=[(PRICE + 1, 1000)])
 
     async def get_lot_size(self, symbol: str) -> Decimal:
+        self.lot_reads.append(symbol)
+        if not self._tradeable_now(symbol):
+            # Omni reads the lot from the same indicative quote as the price, so a shut market
+            # has no lot either; every other client reads it from a cached market listing.
+            raise ApiError("Market is not open for trading")
         return self.lot
 
     async def get_min_trade_usd(self, symbol: str) -> Decimal:
@@ -122,7 +136,7 @@ class SimClient:
         self.leverage_set.append(leverage)
 
     async def is_symbol_tradeable(self, symbol: str, at: datetime, reduce_only=False) -> bool:
-        return self.market_open
+        return self._tradeable_now(symbol)
 
 
 def make_cfg(**values) -> StrategyConfig:
@@ -275,6 +289,26 @@ async def test_parts_below_exchange_minimum_use_fewer_parts(monkeypatch):
     assert all(not acc.pos.get("BTC") for acc in accounts)
 
 
+async def test_mixed_lot_parts_fit_every_venue_lot_and_minimum(monkeypatch):
+    # A hedge on a coarser grid: the whole basket sizes on 0.1, so a $105 leg trades 1.0 = $100,
+    # and 4 parts of that are $20/$30/$20/$30 — under that hedge's $30 minimum, so the entry
+    # trades in 3 parts of $30, $30, $40.
+    accounts, trade, net = basket("1.05", lead="1.05")  # $105 a leg
+    accounts[1].lot = Decimal("0.1")  # coarser than the lead's 0.01
+    accounts[1].min_trade_usd = Decimal(30)
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    entries = [[qty for *_, qty, reduce in acc.orders if not reduce] for acc in accounts]
+    assert trade.lot_size == Decimal("0.1")
+    assert entries == [[Decimal("0.3"), Decimal("0.3"), Decimal("0.4")]] * 2
+    assert all(qty % acc.lot == 0 for acc, qtys in zip(accounts, entries) for qty in qtys)
+    assert all(qty * PRICE >= accounts[1].min_trade_usd for qty in entries[1])
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
 async def test_trade_below_exchange_minimum_fails_before_any_change(monkeypatch):
     accounts, trade, net = basket("1.00")
     accounts[1].min_trade_usd = Decimal(150)  # even the whole $100 leg is too small
@@ -322,6 +356,7 @@ async def test_legs_on_two_lots_reduce_on_the_common_lot():
     net: dict[str, Decimal] = {}
     rh = SimClient("main", net, lot="0.001", exchange="sim_rh")
     core = SimClient("main@core", net, lot="0.0001", exchange="sim_core")
+    rh.min_trade_usd = core.min_trade_usd = Decimal(0)  # BTC's lots at the sim's $100 price
     size = Decimal("0.003") * PRICE
     trade = DeltaTrade(
         "BTC",
@@ -339,6 +374,379 @@ async def test_legs_on_two_lots_reduce_on_the_common_lot():
         Decimal("0.002"),
     ]
     assert net["BTC"] == 0
+
+
+# MARK: Plan validation
+
+
+async def test_unbalanced_basket_is_rejected_before_any_order(monkeypatch):
+    # A $1000 bid leg on a 0.01 grid against two $500 ask legs whose venue trades 7-unit lots:
+    # each leg rounds to one lot, so the basket would hold 7 long against 14 short — $700 of
+    # naked short for the whole trade, which no downstream check measures.
+    accounts, trade, net = basket("5.00", "5.00", lead="10.00")
+    accounts[1].lot = accounts[2].lot = Decimal(7)
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="imbalance"):
+        await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+    assert not net.get("BTC")
+
+
+async def test_leg_that_rounds_to_zero_is_rejected_before_any_order(monkeypatch):
+    # $1000 / $970 / $30 on a 1-unit lot at $100 give 10, 10 and 0: the basket nets to zero and
+    # every leg clears the venue minimum in USD, so only the zero order itself would have failed,
+    # after the other two legs filled.
+    accounts, trade, net = basket("9.70", "0.30", lead="10.00", lot="1")
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="too small to trade"):
+        await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+    assert not net.get("BTC")
+
+
+async def test_min_size_is_checked_against_the_qty_that_will_be_sent(monkeypatch):
+    # A $100 venue minimum (Nado) against a basket lot worth $24: a $105 plan sends 4 lots = $96,
+    # which the venue rejects mid-open, after the other leg has already filled.
+    accounts, trade, net = basket("1.05", lead="1.05")
+    accounts[1].lot = Decimal("0.24")
+    accounts[1].min_trade_usd = Decimal(100)
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="below minimum"):
+        await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+
+
+async def test_reported_size_is_what_was_actually_sent(monkeypatch):
+    # One venue, an off-lot plan: each leg trades whole lots, so the plan log and the reported
+    # volume must show the lot-aligned notional, not the requested one.
+    accounts, trade, net = basket("5.0025", "5.0025", lead="10.005")
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    entries = [[qty for *_, qty, reduce in acc.orders if not reduce] for acc in accounts]
+    assert [sum(qtys) for qtys in entries] == [Decimal(10), Decimal(5), Decimal(5)]
+    assert [leg.size_usd for leg in trade.legs] == [Decimal(1000), Decimal(500), Decimal(500)]
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+@pytest.mark.parametrize(
+    ("lead_lot", "hedge_lot"),
+    [("0.3", "0.13"), ("0.01", "0"), ("0.01", "NaN"), ("0.01", "Infinity")],
+    ids=["step-too-coarse", "zero-lot", "nan-lot", "inf-lot"],
+)
+async def test_untradeable_lot_grids_skip_the_symbol_instead_of_failing_the_cycle(
+    monkeypatch, lead_lot, hedge_lot
+):
+    # 0.3 against 0.13 only meet at 3.9, worth $390 against a $50 leg of this $100 basket, so
+    # every leg would round to one lot or to zero; a zero, NaN or Infinity lot is a broken venue
+    # response. Either way the symbol is not tradeable this cycle, which must not count as a
+    # cycle failure and back the bot off while every other symbol is fine.
+    accounts, trade, net = basket("10.00", lead="10.00", lot=lead_lot)
+    accounts[1].lot = Decimal(hedge_lot)
+    accounts[1].exchange = "sim_core"  # grids differ across venues, never within one
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+
+
+async def test_a_coarse_step_is_tradeable_once_the_trade_size_carries_it(monkeypatch):
+    # The same 0.3/0.13 grids as above, meeting at 3.9 = $390: with an $8000 basket the lightest
+    # leg is $4000 and that step is under a tenth of it, so the symbol trades instead of being
+    # skipped for a ratio to the coarsest lot it never had to satisfy.
+    accounts, trade, net = basket("39.00", lead="39.00", lot="0.3")
+    accounts[1].lot = Decimal("0.13")
+    strategy = strategy_for(accounts, [trade], monkeypatch, trade_size_usd=[8000, 8000])
+    strategy.monitor_trades = AsyncMock(return_value=True)
+    rounds = record_rounds(monkeypatch, accounts, net)
+
+    await strategy.trade_cycle()
+
+    entries = [[qty for *_, qty, reduce in acc.orders if not reduce] for acc in accounts]
+    assert trade.lot_size == Decimal("3.9")
+    assert entries == [[Decimal("7.8"), Decimal("11.7"), Decimal("7.8"), Decimal("11.7")]] * 2
+    assert all(qty % acc.lot == 0 for acc, qtys in zip(accounts, entries) for qty in qtys)
+    assert [r["net"]["BTC"] for r in rounds[:4]] == [0] * 4  # every entry part is neutral
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_lot_grids_that_meet_further_out_are_tradeable(monkeypatch):
+    # 0.2 and 0.5 reject each other's lot, but both accept 1.0, so the basket trades on 1.0.
+    # The $4000 trade size matches the planned basket: that step is $100, a tenth of a leg.
+    accounts, trade, net = basket("10.00", lead="10.00", lot="0.5")
+    accounts[1].lot = Decimal("0.2")
+    strategy = strategy_for(accounts, [trade], monkeypatch, trade_size_usd=[4000, 4000])
+    strategy.monitor_trades = AsyncMock(return_value=True)
+    rounds = record_rounds(monkeypatch, accounts, net)
+
+    await strategy.trade_cycle()
+
+    entries = [[qty for *_, qty, reduce in acc.orders if not reduce] for acc in accounts]
+    assert trade.lot_size == Decimal(1)
+    assert entries == [[Decimal(2), Decimal(3), Decimal(2), Decimal(3)]] * 2
+    assert all(qty % acc.lot == 0 for acc, qtys in zip(accounts, entries) for qty in qtys)
+    assert [r["net"]["BTC"] for r in rounds[:4]] == [0] * 4  # every entry part is neutral
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_a_step_that_overshoots_the_planned_size_is_refused_before_any_order(monkeypatch):
+    # 0.2 and 0.5 meet at 1.0, and a $150 leg at price 100 is 1.5 steps, which rounds half-even
+    # up: $200 a leg, a third over plan, out of margin find_safe_pair sized at 90%. The venue
+    # rejects it for margin mid-open, after the lead has filled on a limit or a hedge delay.
+    accounts, trade, net = basket("1.50", lead="1.50", lot="0.5")
+    accounts[1].lot = Decimal("0.2")
+    strategy = strategy_for(accounts, [trade], monkeypatch, trade_size_usd=[4000, 4000])
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="over the planned size"):
+        await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+    assert not net.get("BTC")
+
+
+async def test_a_fine_venue_leg_cannot_borrow_the_coarse_venue_lot():
+    # 0.001 against 1 nest, so the basket trades whole units. A $60 leg on the coarse venue rounds
+    # to $100 on its own grid, as it always has; the same $100 on the fine venue is the basket
+    # step's doing, two thirds over its plan and paid out of that account's margin.
+    accounts, trade, net = basket("0.60", lead="0.60", lot="0.001")
+    accounts[1].lot = Decimal(1)
+    accounts[1].exchange = "sim_core"
+
+    with pytest.raises(RuntimeError, match=r"over the planned size \(acc0 100\.00/60\.00 USD\)"):
+        await trade.load_qtys()
+
+
+async def test_a_nested_step_too_coarse_for_the_fine_venue_skips_the_symbol(monkeypatch):
+    # The same grids through a cycle: the filter prices the whole-unit step against the planned
+    # legs and skips the symbol instead of letting the plan fail every cycle.
+    accounts, trade, net = basket("0.60", lead="0.60", lot="0.001")
+    accounts[1].lot = Decimal(1)
+    accounts[1].exchange = "sim_core"
+    strategy = strategy_for(accounts, [trade], monkeypatch, market_hours="off")
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+
+
+async def test_a_single_venue_grid_may_round_a_leg_up_as_it_always_has(monkeypatch):
+    # One venue on a 1.0 lot: a $150 leg is 1.5 lots and sends $200, the same third over plan.
+    # That is the venue's own grid rather than a step the basket invented, and it trades today,
+    # so the ceiling above must not reach it — half a leg lot is always allowed.
+    accounts, trade, net = basket("1.50", lead="1.50", lot="1")
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    entries = [[qty for *_, qty, reduce in acc.orders if not reduce] for acc in accounts]
+    assert entries == [[Decimal(1), Decimal(1)]] * 2  # 2 lots a leg, so 2 parts, not 4
+    assert [leg.size_usd for leg in trade.legs] == [Decimal(200)] * 2  # what was really sent
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_an_unreadable_lot_size_fails_the_cycle_instead_of_dropping_the_symbol(monkeypatch):
+    # A symbol the cycle actually plans must never be skipped quietly: an expired session, a 429
+    # or a dead proxy has to reach `run()`'s backoff and Telegram error, not log "0/1 symbols are
+    # tradeable", reset the failure count and leave the bot looping forever doing nothing.
+    accounts, trade, net = basket("1.00")
+
+    async def no_lot(symbol: str) -> Decimal:
+        raise ApiError("401 session expired")
+
+    monkeypatch.setattr(accounts[1], "get_lot_size", no_lot)
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    with pytest.raises(ApiError, match="session expired"):
+        await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+
+
+async def test_a_closed_market_does_not_fail_a_cycle_that_has_symbols_to_trade(monkeypatch):
+    # The live shape: one exchange, several configured markets, one of them inside its daily
+    # closure. Omni answers both the lot size and the price from one indicative quote and refuses
+    # while a market is shut, so reading a lot per configured symbol failed every cycle — closing
+    # the pool, counting a failure, backing off 3m→60m and sending a Telegram error — for a market
+    # the cycle was not going to trade. One exchange shares one grid per market, so nothing is
+    # read here at all.
+    accounts, trade, net = basket("1.00")
+    for acc in accounts:
+        acc.closed = {"US100S"}
+
+    strategy = strategy_for(
+        accounts, [trade], monkeypatch, symbols=["BTC", "US100S"], market_hours="off"
+    )
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert [qty for *_, qty, reduce in accounts[0].orders if not reduce] == [Decimal("0.25")] * 4
+    assert all("US100S" not in acc.lot_reads + acc.price_reads for acc in accounts)
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_a_market_that_reopens_before_the_entry_does_not_fail_the_cycle(monkeypatch):
+    # The same failure under the default `market_hours = "auto"`: the hours filter asks about
+    # `open_at`, which limit waits push hours ahead, so a market closed right now passes it and
+    # only then has its lot read. An index swap inside its daily closure failed every cycle.
+    accounts, trade, net = basket("1.00")
+
+    async def open_at_entry(symbol: str, at: datetime, reduce_only=False) -> bool:
+        return True  # shut right now, open by the time the cycle would enter
+
+    for acc in accounts:
+        acc.closed = {"US100S"}
+        acc.is_symbol_tradeable = open_at_entry
+
+    strategy = strategy_for(accounts, [trade], monkeypatch, symbols=["BTC", "US100S"])
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert [qty for *_, qty, reduce in accounts[0].orders if not reduce] == [Decimal("0.25")] * 4
+    assert all("US100S" not in acc.lot_reads for acc in accounts)
+
+
+async def test_lot_grids_are_read_once_per_venue(monkeypatch):
+    # Lots come from a market record keyed by the symbol alone in every client here, so a second
+    # account on a venue has nothing new to say and its reads are pure cost — on Omni an uncached
+    # authenticated quote per account per symbol per cycle.
+    accounts, trade, net = basket("0.50", "0.50")  # acc0 and acc1 share the simulator venue
+    accounts[2].exchange = "sim_core"
+    strategy = strategy_for(accounts, [trade], monkeypatch, symbols=["BTC", "ETH"])
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy._tradeable_symbols(30, Decimal(100))
+
+    assert accounts[0].lot_reads == ["BTC", "ETH"]  # first account of its venue reads for it
+    assert accounts[1].lot_reads == []  # same venue as the lead: the same grid
+    assert accounts[2].lot_reads == ["BTC", "ETH"]
+
+
+async def test_a_mixed_venue_pool_drops_a_symbol_its_venue_cannot_quote(monkeypatch):
+    # Across venues the grids do have to be reconciled, and Omni's refusal to quote a shut market
+    # is indistinguishable from a transient error. Dropping the symbol with the API's own words
+    # beats failing a cycle that has other symbols to trade; the drop is a warning, and the empty
+    # cycle is the "Only n/m symbols are tradeable" warning, so neither is silent.
+    accounts, trade, net = basket("1.00")
+    accounts[1].exchange = "sim_core"
+    accounts[1].closed = {"BTC"}
+    warning = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.warning", warning)
+    strategy = strategy_for(accounts, [trade], monkeypatch, market_hours="off")
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+    assert warning.call_args_list[0][0][0] == (
+        "Symbols not tradeable across venues — BTC: sim_core: Market is not open for trading"
+    )
+    assert "Only 0/1 symbols are tradeable" in warning.call_args_list[1][0][0]
+
+
+async def test_a_coarse_step_whose_price_is_unavailable_drops_the_symbol(monkeypatch):
+    # Valuing an invented step needs one price, and the lot being readable says nothing about the
+    # price: Lighter reads lots from a cached listing and prices from a live book, Omni serves both
+    # from the same quote. A step that cannot be valued drops its symbol instead of failing the
+    # cycle, exactly as an unreadable lot does.
+    accounts, trade, net = basket("10.00", lead="10.00", lot="0.3")
+    accounts[1].lot = Decimal("0.13")  # 0.3 and 0.13 meet at 3.9, a step neither venue trades
+    accounts[1].exchange = "sim_core"
+
+    async def no_price(symbol: str) -> Decimal:
+        raise ApiError("429 too many requests")
+
+    monkeypatch.setattr(accounts[0], "get_price", no_price)
+    warning = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.warning", warning)
+    strategy = strategy_for(accounts, [trade], monkeypatch, market_hours="off")
+    strategy.monitor_trades = AsyncMock(return_value=True)
+
+    await strategy.trade_cycle()
+
+    assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+    assert warning.call_args_list[0][0][0] == (
+        "Symbols not tradeable across venues — BTC: sim: 429 too many requests"
+    )
+
+
+def test_split_refuses_a_lead_that_shares_its_side():
+    # Every part's lead is the sum of that part's hedges, so a second leg on the lead's side would
+    # plan a lead larger than its own side. The bid total still equals the ask total here, which
+    # is exactly why check_plan cannot see it.
+    accounts, trade, net = basket("1.00", "1.00")
+    trade.lot_size = Decimal("0.01")
+    trade.rest[0].side = "bid"
+    trade.lead.qty, trade.rest[0].qty, trade.rest[1].qty = Decimal(1), Decimal(1), Decimal(2)
+
+    trade.check_plan()  # balanced in totals: 2 bid against 2 ask
+
+    with pytest.raises(RuntimeError, match="cannot share its bid side"):
+        trade.split(2)
+
+
+def test_split_refuses_an_unbalanced_trade_even_in_one_part():
+    accounts, trade, net = basket("1.00")
+    trade.lot_size = Decimal("0.01")
+    trade.lead.qty, trade.rest[0].qty = Decimal("0.07"), Decimal("0.14")
+
+    with pytest.raises(RuntimeError, match="not delta-neutral"):
+        trade.split(1)
+
+
+async def test_an_off_grid_plan_does_not_fall_back_to_one_part(monkeypatch):
+    # Only "too few lots for this many parts" may step down to fewer parts. Qtys that do not sit
+    # on the basket lot are a broken plan: trading it in one part sends off-grid orders.
+    accounts, trade, net = basket("1.00")
+    trade.lot_size = Decimal("0.1")
+    trade.lead.qty, trade.rest[0].qty = Decimal("0.25"), Decimal("0.25")
+    strategy = strategy_for(accounts, [trade], monkeypatch)
+
+    with pytest.raises(ValueError, match="not a multiple"):
+        await strategy._fit_parts([trade])
+
+    assert all(not acc.orders for acc in accounts)
+
+
+async def test_zero_lot_size_fails_with_a_clear_error():
+    accounts, trade, net = basket("1.00")
+    accounts[1].lot = Decimal(0)  # Omni reads qty_tick straight from a quote payload
+
+    with pytest.raises(RuntimeError, match="lot size"):
+        await trade.load_qtys()
+
+
+@pytest.mark.parametrize(
+    ("lots", "step"),
+    [
+        (["0.01"], "0.01"),
+        (["0.001", "0.001"], "0.001"),
+        (["0.01", "0.1"], "0.1"),  # nested grids: the coarsest lot, as a single venue uses
+        (["0.2", "0.5"], "1"),
+        (["0.0025", "0.001"], "0.005"),
+        (["0.1", "0.01", "7"], "7"),
+    ],
+)
+def test_basket_lot_is_the_finest_step_every_grid_accepts(lots, step):
+    assert basket_lot_size([Decimal(lot) for lot in lots]) == Decimal(step)
 
 
 @pytest.mark.parametrize("failed_order", [1, 3, 4, 6, 8])
