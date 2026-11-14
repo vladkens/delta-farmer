@@ -199,6 +199,7 @@ def render_stats(
     points_fmt: str = "{:,.2f}",
     pprice_fmt: str = "{:,.2f}",
     min_vol: int = 1_000,
+    title: str | None = None,
 ) -> None:
     telemetry.track(
         "stats_rendered",
@@ -239,7 +240,7 @@ def render_stats(
         ]
     cols.append(Column("Total Vol", "{:,.0f}", total=sum, grand_total=False))
 
-    tbl = AutoTable(*cols)
+    tbl = AutoTable(*cols, title=title)
     tvol: defaultdict[str, Decimal] = defaultdict(Decimal)
 
     for pk in periods_to_show:

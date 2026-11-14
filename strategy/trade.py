@@ -81,6 +81,7 @@ async def plan_delta_trades(
     total_size_usd: Decimal,
     leverage: int,
     balances: list[tuple[str, float]],
+    long_exchange: str | None = None,
 ) -> list["DeltaTrade"] | None:
     pairs = find_safe_pair(balances, float(total_size_usd), leverage)
     if pairs is None:
@@ -97,16 +98,25 @@ async def plan_delta_trades(
     mapping = {acc.name: acc for acc in accounts}
     trades: list[DeltaTrade] = []
 
+    if long_exchange is not None:
+        # A cross-venue points boost pays only while the long leg sits on the venue named for the
+        # week, so the side comes from each leg's exchange, not from the draw above (which then
+        # only picks per-symbol sides, and _check_cfg keeps such a pool at one symbol).
+        venues = dict.fromkeys(mapping[name].exchange for name, _ in pairs)
+        shorts = [venue for venue in venues if venue != long_exchange]
+        logger.info(f"Hedge direction: {long_exchange} long, {', '.join(shorts)} short")
+
     for symbol, (trade_size, trade_side) in symbol_sizes.items():
         ratio = trade_size / total_size
-        legs: list[DeltaLeg] = [
-            DeltaLeg(
-                client=mapping[name],
-                side=trade_side if j == 0 else opposite_side(trade_side),
-                size_usd=Decimal(str(size)) * ratio,
-            )
-            for j, (name, size) in enumerate(pairs)
-        ]
+        legs: list[DeltaLeg] = []
+        for j, (name, size) in enumerate(pairs):
+            client = mapping[name]
+            side: Side = trade_side if j == 0 else opposite_side(trade_side)
+            if long_exchange is not None:
+                side = "bid" if client.exchange == long_exchange else "ask"
+
+            legs.append(DeltaLeg(client=client, side=side, size_usd=Decimal(str(size)) * ratio))
+
         trades.append(DeltaTrade(symbol=symbol, lead=legs[0], rest=legs[1:]))
 
     return trades
@@ -188,9 +198,34 @@ class DeltaTrade:
             leg.qty = sum((p.legs[i].qty for p in parts), Decimal(0))
             leg.size_usd = sum((p.legs[i].size_usd for p in parts), Decimal(0))
 
+    async def _common_lot_size(self) -> Decimal:
+        """The lead's lot, or the coarsest lot when the legs sit on more than one exchange.
+
+        Accounts on one exchange share its lot grid, so only the lead's lot is read, as before.
+        Lighter RH and Core list some markets with different lots, and a qty on the finer grid
+        would be cut on the coarser one, leaving the pair unhedged. Nested grids (powers of ten)
+        accept the coarsest lot on every venue; other grids are refused before any order.
+        """
+        lead = self.lead.client
+        lot = await lead.get_lot_size(self.symbol)
+        others = {
+            x.client.exchange: x.client for x in self.rest if x.client.exchange != lead.exchange
+        }
+        if not others:
+            return lot
+
+        lots = [lot, *await asyncio.gather(*[x.get_lot_size(self.symbol) for x in others.values()])]
+        coarsest = max(lots)
+        if any(coarsest % x for x in lots):
+            raise RuntimeError(
+                f"{self.symbol}: lot sizes {', '.join(map(str, lots))} share no step"
+            )
+
+        return coarsest
+
     async def load_qtys(self) -> None:
         price = await self.lead.client.get_price(self.symbol)
-        lot_size = self.lot_size = await self.lead.client.get_lot_size(self.symbol)
+        lot_size = self.lot_size = await self._common_lot_size()
         for leg in self.legs:
             leg.qty = usd_to_qty(leg.size_usd, price, lot_size)
 
@@ -294,8 +329,15 @@ class DeltaTrade:
     async def reduce(self, cfg: TradeConfig, remaining: int, use_limit=False) -> None:
         """Close 1/remaining of each leg's position; a final close() takes the exact rest."""
 
+        # Legs on several exchanges opened on their common lot and reduce on it too: a finer-lot
+        # leg rounding on its own lot would leave the pair directional.
+        mixed = len({leg.client.exchange for leg in self.legs}) > 1
+
         async def _reduce(leg: DeltaLeg, limit: bool) -> None:
-            lot = await leg.client.get_lot_size(self.symbol)
+            if mixed and self.lot_size:
+                lot = self.lot_size
+            else:
+                lot = await leg.client.get_lot_size(self.symbol)
             for pos in await self._positions(leg.client):
                 qty = round_to_tick_size(pos.size / remaining, lot)
                 if qty <= 0:

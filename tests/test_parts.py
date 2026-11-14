@@ -32,8 +32,11 @@ class SimClient:
 
     exchange = "sim"
 
-    def __init__(self, name: str, net: dict[str, Decimal], *, lot: str = "0.01"):
+    def __init__(
+        self, name: str, net: dict[str, Decimal], *, lot: str = "0.01", exchange: str = "sim"
+    ):
         self.name = name
+        self.exchange = exchange
         self.net = net  # shared across accounts: symbol -> signed exposure of the whole basket
         self.lot = Decimal(lot)
         self.pos: dict[str, Decimal] = {}  # symbol -> signed qty
@@ -150,10 +153,12 @@ def basket(*hedges: str, lead: str = "1.00", lot: str = "0.01"):
     return accounts, trade, net
 
 
-def strategy_for(accounts: list[SimClient], trades: list[DeltaTrade], monkeypatch, **cfg):
+def strategy_for(accounts: list[SimClient], trades: list[DeltaTrade] | None, monkeypatch, **cfg):
+    """A strategy over the simulator. `trades=None` runs the real planner instead of a fixed plan."""
     strategy = DeltaStrategy(make_cfg(**cfg), cast(list[TradingClient], accounts))
     strategy.initial_bal = 1000 * len(accounts)
-    monkeypatch.setattr("strategy.cycle.plan_delta_trades", AsyncMock(return_value=trades))
+    if trades is not None:
+        monkeypatch.setattr("strategy.cycle.plan_delta_trades", AsyncMock(return_value=trades))
     monkeypatch.setattr("strategy.cycle.random.sample", lambda values, count: list(values))
     monkeypatch.setattr("strategy.cycle.tg.on_trade_start", AsyncMock(return_value=1))
     monkeypatch.setattr("strategy.cycle.tg.on_trade_stop", AsyncMock())
@@ -278,6 +283,61 @@ async def test_trade_below_exchange_minimum_fails_before_any_change(monkeypatch)
         await strategy.trade_cycle()
 
     assert all(not acc.orders and not acc.leverage_set for acc in accounts)
+
+
+# MARK: Hedge direction
+
+
+@pytest.mark.parametrize("draw", ["bid", "ask"], ids=["draw-bid", "draw-ask"])
+@pytest.mark.parametrize("long_exchange", ["sim_rh", "sim_core"], ids=["rh-long", "core-long"])
+async def test_configured_long_exchange_reaches_the_orders(monkeypatch, long_exchange, draw):
+    # The real planner, driven through a whole cycle: a configured direction has to survive the
+    # cycle's call into it, whatever side the random draw would have picked, or roughly half the
+    # cycles of a hedge pool hold the forbidden direction and earn no boost.
+    net: dict[str, Decimal] = {}
+    accounts = [
+        SimClient("rh", net, exchange="sim_rh"),
+        SimClient("core", net, exchange="sim_core"),
+    ]
+    strategy = strategy_for(
+        accounts, None, monkeypatch, long_exchange=long_exchange, first_as_prime=True
+    )
+    strategy.monitor_trades = AsyncMock(return_value=True)
+    monkeypatch.setattr("strategy.trade.random.choice", lambda _: draw)
+
+    await strategy.trade_cycle()
+
+    short_exchange = "sim_core" if long_exchange == "sim_rh" else "sim_rh"
+    entries = {
+        acc.exchange: {side for _, side, _, reduce in acc.orders if not reduce} for acc in accounts
+    }
+    assert entries == {long_exchange: {"bid"}, short_exchange: {"ask"}}
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_legs_on_two_lots_reduce_on_the_common_lot():
+    # RH lists BTC on 0.001 and Core on 0.0001: half of 0.003 rounds to 0.002 on the coarse lot
+    # but 0.0015 on the fine one, which would leave 0.0005 directional after the reduce.
+    net: dict[str, Decimal] = {}
+    rh = SimClient("main", net, lot="0.001", exchange="sim_rh")
+    core = SimClient("main@core", net, lot="0.0001", exchange="sim_core")
+    size = Decimal("0.003") * PRICE
+    trade = DeltaTrade(
+        "BTC",
+        DeltaLeg(cast(TradingClient, rh), "bid", size),
+        [DeltaLeg(cast(TradingClient, core), "ask", size)],
+    )
+    cfg = make_cfg()
+
+    await trade.load_qtys()
+    await trade.open(cfg)
+    await trade.reduce(cfg, 2)
+
+    assert [qty for _, _, qty, reduce in [*rh.orders, *core.orders] if reduce] == [
+        Decimal("0.002"),
+        Decimal("0.002"),
+    ]
+    assert net["BTC"] == 0
 
 
 @pytest.mark.parametrize("failed_order", [1, 3, 4, 6, 8])

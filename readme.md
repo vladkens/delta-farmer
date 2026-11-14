@@ -56,6 +56,8 @@ Each exchange has a launcher under `apps/`. Use the launcher name as `<app>` in 
 
 Delta-farmer previously supported Ethereal and HyENA. Both projects have closed and their launchers were removed; `scripts/weekly.py` still includes their cached history.
 
+The `lighter` launcher serves both Lighter deployments. Every account trades on Robinhood Chain, and the same wallet on [Lighter Core](https://app.lighter.xyz/) is the account's Core twin. Deposits, withdrawals, referral codes, and points reporting exist on Robinhood Chain only. A pool can hedge each account's Robinhood Chain position with its Core twin to earn the points program's hedge boost, described in "Lighter RH and Core hedge" below.
+
 ## Installation
 
 You need [Git](https://git-scm.com/downloads) and [uv](https://docs.astral.sh/uv/getting-started/installation/). Uv installs the pinned Python version and locked dependencies for the project.
@@ -321,6 +323,39 @@ report_interval = "1h"
 ```
 
 Run `config encrypt` again after adding the token.
+
+## Lighter RH and Core hedge
+
+The Lighter points program pays a 2.5x boost on weekly points when a position on Robinhood Chain is hedged by the opposite position on Lighter Core. Both legs sit in one wallet, so the hedge needs no second account: each account also trades on Core through its Core twin, which uses the same key and proxy and is named `main@core` for an account `main` in logs, positions, and smoke runs. In a pool, `long_exchange` names the exchange that must hold the long leg: `lighter` for Robinhood Chain or `lighter_core` for Core. Every account in such a pool trades as its own pair, its Robinhood Chain leg against its Core twin, one symbol per cycle. Several accounts run as several pairs, one group each, and a pair never mixes two wallets, so the pool refuses `regroup_interval` and any `group_size` other than 2.
+
+The required direction is published per week and per market category in the [points documentation](https://docs.lighter.xyz/programs/lighter-on-robinhood-chain-points.md). It can change every week, so re-check `long_exchange` against that table every week; the wrong direction earns no boost. Two categories can require opposite directions in the same week, so keep one pool per category.
+
+```toml
+[[accounts]]
+name = "main"
+privkey = "your-private-key"
+proxy = "http://user:pass@host:port"
+
+[pools.hedge-crypto]
+accounts = ["main"]
+symbols = ["BTC"]
+long_exchange = "lighter"  # deployment holding the long leg; re-check the table every week
+leverage = 10
+use_limit = false
+first_as_prime = true
+trade_size_usd = { min = 1000, max = 1200 }
+trade_duration = { min = "2h", max = "4h" }
+trade_cooldown = { min = "5m", max = "10m" }
+```
+
+Before the first run:
+
+- Fund the account on the Core web app by hand, then run `login`, which also logs in the Core twin of every account in a pool with `long_exchange`; `close` and `positions` cover both legs of those accounts, and the Core twin of any other enabled account once it is logged in. `deposit`, `withdraw`, and `useref` act on Robinhood Chain only. A wallet without a Core account stops `trade` with `Not registered`.
+- Configure only symbols that both deployments list; their market lists overlap partly. A market's spelling, lot size, and minimum order size can differ between the two, and a symbol missing on either one fails startup validation.
+- Keep `use_limit = false` and leave `hedge_delay` unset at first. A limit order on one deployment leaves the other deployment's leg directional for up to `limit_wait * (1 + limit_wait_retries)`, and the basis between the two order books adds to that exposure.
+- Smoke-test the Core leg as `uv run scripts/smoke.py lighter DOGE 15 -a main@core`; `-a main` tests the Robinhood Chain leg, and `-p hedge-crypto` names the pool as well. The script places real orders, so on a pools config it never guesses: with neither flag it exits with `name a pool with -p or an account with -a`.
+
+`info` and `stats` print one table per deployment, Lighter RH and then Lighter Core, each with its own totals. The Core table has no points or referral codes, and `info` lists the accounts without a Core account, and those not logged in there, in one line each under it. Core volume, burn, and `stats` count from the campaign start, 2026-09-01 UTC, the same cutoff as Robinhood Chain, so a wallet's earlier manual trading on Core stays out of them. Caches never mix, and `scripts/weekly.py` reports Core in a row of its own. Core runs no campaign calendar, so its statistics are bucketed by ISO weeks with their year, such as `2026-W46`; filter a Core week as `2026-W46`.
 
 ## Funding and wallet tools
 

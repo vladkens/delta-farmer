@@ -227,8 +227,14 @@ async def setup_app[T: CliClient](
     args: argparse.Namespace,
     cfg: MoveConfig,
     factory: Callable[[AccountConfig], T],
+    *,
+    extra_logins: Sequence[LoginClient] = (),
 ) -> tuple[list[T], list[T]]:
-    """Set up clients and handle common commands that need the application config."""
+    """Set up clients and handle common commands that need the application config.
+
+    `extra_logins` are further sessions of the same wallets, such as another deployment of the
+    exchange, that `login` restores after the accounts themselves.
+    """
     clients = [(factory(account), account.enabled) for account in cfg.accounts]
     all_clients = [client for client, _enabled in clients]
     active_clients = [client for client, enabled in clients if enabled]
@@ -240,7 +246,7 @@ async def setup_app[T: CliClient](
     await _show_banner(status)
 
     if args.command == "login":
-        await _handle_login(all_clients, force=args.force)
+        await _handle_login([*all_clients, *extra_logins], force=args.force)
         sys.exit(0)
 
     if args.command == "addrs":

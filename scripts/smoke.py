@@ -1,20 +1,95 @@
 # delta-farmer | https://github.com/vladkens/delta-farmer
 # Smoke test – quick sanity check that the exchange API is still alive.
 # Tests one account (first enabled by default) with a symbol that must NOT be in config symbols.
-# Usage: uv run scripts/smoke.py EXCHANGE SYMBOL SIZE_USD [-c xxx.toml] [-a account]
+# A pools config needs a pool (-p) or an account (-a); its symbols come from that pool.
+# On Lighter, `-a main@core` tests account main's Core twin: the same wallet on Lighter Core.
+# Usage: uv run scripts/smoke.py EXCHANGE SYMBOL SIZE_USD [-c xxx.toml] [-p pool] [-a account]
 import argparse
 import asyncio
 import glob
 import sys
 import time
 from decimal import ROUND_CEILING, Decimal
+from typing import NamedTuple
 
+from apps.lighter import CORE_SUFFIX
+from lib.errors import AppError
+from lib.models import AccountConfig
 from lib.utils import round_to_tick_size
-from strategy import TradingClient, usd_to_qty
+from strategy import AppConfig, StrategyPoolConfig, TradingClient, usd_to_qty
 
 PASS = "✓"
 FAIL = "✗"
 SKIP = "~"
+
+
+class SmokeTarget(NamedTuple):
+    """The account to test and the symbols its bot already trades."""
+
+    account: AccountConfig
+    symbols: list[str]
+    pools: list[str]  # pools the symbols came from; empty for a config without pools
+
+
+def resolve_target(cfg: AppConfig, pool_name: str | None, account_name: str | None) -> SmokeTarget:
+    """Pick the account to test and the symbols a running bot trades on it.
+
+    A pools config must name a pool or an account: this script places real orders, and the
+    first enabled account of the whole config can be in another pool.
+    """
+    if pool_name is not None and not cfg.pools:
+        raise AppError("this config has no pools, drop -p")
+
+    pool: StrategyPoolConfig | None = None
+    if pool_name is not None:
+        pool = cfg.pools.get(pool_name)
+        if pool is None:
+            raise AppError(f"unknown pool '{pool_name}'; available: {', '.join(cfg.pools)}")
+
+    if cfg.pools and pool is None and account_name is None:
+        raise AppError(f"name a pool with -p or an account with -a; pools: {', '.join(cfg.pools)}")
+
+    candidates = (
+        cfg.accounts if pool is None else [a for a in cfg.accounts if a.name in pool.accounts]
+    )
+
+    if account_name is None:
+        if not candidates:
+            raise AppError("no accounts to test")
+
+        account = next((a for a in candidates if a.enabled), candidates[0])
+    else:
+        account = next((a for a in candidates if a.name == account_name), None)
+        if account is None and pool is not None:
+            names = ", ".join(pool.accounts)
+            raise AppError(f"account '{account_name}' is not in pool '{pool_name}': {names}")
+
+        if account is None:
+            names = ", ".join(a.name for a in cfg.accounts)
+            raise AppError(f"account '{account_name}' not found; available: {names}")
+
+    if not cfg.pools:
+        assert cfg.strategy is not None  # AppConfig requires one of pools / trading settings
+        return SmokeTarget(account, cfg.strategy.symbols, [])
+
+    if pool_name is not None and pool is not None:
+        return SmokeTarget(account, pool.symbols, [pool_name])
+
+    owner = next((n for n, p in cfg.pools.items() if account.name in p.accounts), None)
+    if owner is not None:
+        return SmokeTarget(account, cfg.pools[owner].symbols, [owner])
+
+    # Account in no pool (a disabled spare): avoid every symbol any pool trades.
+    symbols = dict.fromkeys(s for p in cfg.pools.values() for s in p.symbols)
+    return SmokeTarget(account, list(symbols), list(cfg.pools))
+
+
+def split_core_twin(exchange: str, account_name: str | None) -> tuple[str | None, bool]:
+    """The configured account behind `-a`, and whether `-a` named its Lighter Core twin."""
+    if exchange == "lighter" and account_name is not None and account_name.endswith(CORE_SUFFIX):
+        return account_name.removesuffix(CORE_SUFFIX), True
+
+    return account_name, False
 
 
 async def smoke(client: TradingClient, symbol: str, size_usd: float) -> tuple[int, int]:
@@ -249,6 +324,9 @@ async def main():
         "-c", "--config", default=None, help="Path to config file (auto-detected if omitted)"
     )
     parser.add_argument(
+        "-p", "--pool", default=None, metavar="POOL", help="Pool name from config (pools config)"
+    )
+    parser.add_argument(
         "-a", "--account", default=None, help="Account name from config (defaults to first account)"
     )
     args = parser.parse_args()
@@ -263,47 +341,52 @@ async def main():
         print(f"config   : {args.config} (auto)")
 
     from apps.hyperliquid import HyperLiquidNativeClient
-    from clients.lighter import LighterClient
+    from apps.lighter import make_core_twin
+    from clients.lighter import LighterRobinhoodClient
     from clients.n1 import N1Client
     from clients.nado import NadoClient
     from clients.omni import OmniClient
     from clients.pacifica import PacificaClient
     from clients.rise import RiseClient
-    from strategy import StrategyConfig
 
-    CLIENT_MAP = {
-        "hyperliquid": HyperLiquidNativeClient,
-        "lighter": LighterClient,
-        "nado": NadoClient,
-        "omni": OmniClient,
-        "pacifica": PacificaClient,
-        "rise": RiseClient,
-        "n1": N1Client,
+    CLIENT_FACTORIES = {
+        "hyperliquid": HyperLiquidNativeClient.from_config,
+        "lighter": LighterRobinhoodClient.from_config,
+        "nado": NadoClient.from_config,
+        "omni": OmniClient.from_config,
+        "pacifica": PacificaClient.from_config,
+        "rise": RiseClient.from_config,
+        "n1": N1Client.from_config,
     }
-    if args.exchange not in CLIENT_MAP:
+    if args.exchange not in CLIENT_FACTORIES:
         parser.error(f"unsupported exchange '{args.exchange}'")
 
-    cfg = StrategyConfig.load(args.config)
-    if args.account is None:
-        acc_cfg = next((acc for acc in cfg.accounts if acc.enabled), cfg.accounts[0])
-    else:
-        acc_cfg = next((acc for acc in cfg.accounts if acc.name == args.account), None)
-        if acc_cfg is None:
-            names = ", ".join(acc.name for acc in cfg.accounts)
-            parser.error(f"account '{args.account}' not found in {args.config}; available: {names}")
-    client = CLIENT_MAP[args.exchange].from_config(acc_cfg)
+    cfg = AppConfig.load(args.config)
+    account_name, core_twin = split_core_twin(args.exchange, args.account)
+    try:
+        target = resolve_target(cfg, args.pool, account_name)
+    except AppError as e:
+        parser.error(f"{args.config}: {e}")
 
-    if args.symbol in cfg.symbols:
+    # A smoke run places real orders, so it reaches Core only when `-a` names the twin.
+    factory = make_core_twin if core_twin else CLIENT_FACTORIES[args.exchange]
+    client = factory(target.account)
+
+    if args.symbol in target.symbols:
         parser.error(
-            f"symbol '{args.symbol}' is in config symbols {cfg.symbols} — "
+            f"symbol '{args.symbol}' is in config symbols {target.symbols} — "
             "pick a different symbol to avoid conflicting with the running bot"
         )
+
     normalize = getattr(client, "_coin", lambda s: s)
     symbol = normalize(args.symbol)  # normalize: "ETH" → "xyz:ETH" etc.
 
-    print(f"exchange : {args.exchange}")
-    print(f"account  : {acc_cfg.name}")
-    print(f"symbol   : {symbol}  (bot symbols: {', '.join(cfg.symbols)})")
+    print(f"exchange : {client.exchange}")
+    print(f"account  : {client.name}")
+    if target.pools:
+        one_pool = len(target.pools) == 1
+        print(f"pool     : {target.pools[0] if one_pool else 'none, symbols from all pools'}")
+    print(f"symbol   : {symbol}  (bot symbols: {', '.join(target.symbols)})")
     print(f"size     : ${args.size} USD")
 
     passed, failed = await smoke(client, symbol, args.size)

@@ -5,7 +5,7 @@ import random
 import time
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
-from typing import NamedTuple, Protocol
+from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import Field
 
@@ -24,6 +24,7 @@ DEPOSIT_START_DELAY_SEC = 1.5
 BALANCE_TARGET_STEP = Decimal("0.05")
 
 
+@runtime_checkable
 class DepositClient(Protocol):
     exchange: str
     name: str
