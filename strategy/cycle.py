@@ -3,10 +3,11 @@
 import asyncio
 import random
 import time
-from collections.abc import Generator, Sequence
+from collections.abc import Awaitable, Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 
 from lib import telegram as tg
 from lib import utils
@@ -15,10 +16,19 @@ from lib.errors import AppError
 from lib.logger import logger
 from lib.utils import round_to_tick_size
 
-from .execution import close_all
+from .execution import close_all, error_detail
 from .models import MarketHoursMode, TradeConfig, TradingClient, trading_client_trace
-from .symbols import filter_exchange_symbols
-from .trade import DeltaTrade, DeltaTradeSummary, plan_delta_trades
+from .symbols import filter_exchange_symbols, unique_exchange_clients
+from .trade import (
+    SIZE_OVERSHOOT_LIMIT,
+    DeltaTrade,
+    DeltaTradeSummary,
+    PartsTooSmall,
+    PlanError,
+    basket_lot_size,
+    plan_delta_trades,
+    smallest_leg_usd,
+)
 
 USD_TICK = Decimal("0.01")
 SAFE_PCT = Decimal("0.96")  # leave 4% margin to avoid liquidation on leverage rounding
@@ -29,6 +39,33 @@ def _format_error(exc: BaseException) -> str:
     msg = f"{type(exc).__name__}: {exc}"
     client_path = trading_client_trace(exc)
     return f"{msg} @ {client_path}" if client_path else msg
+
+
+async def _read_markets[T](
+    calls: Sequence[tuple[str, TradingClient, Awaitable[T]]],
+) -> tuple[list[tuple[str, T]], dict[str, str]]:
+    """Read one market value per (symbol, venue); name the symbols whose venue could not answer.
+
+    Every sibling is awaited and cancellation propagates, as `strategy/symbols.py` does. Anything
+    else is one venue's answer about one market, so it costs that symbol and not the cycle: Omni
+    serves both the lot size and the price from one quote endpoint that refuses while that market
+    is shut, and no exception type tells a closure from a transient error.
+    """
+    values = await asyncio.gather(*[call for _, _, call in calls], return_exceptions=True)
+
+    read: list[tuple[str, T]] = []
+    failed: dict[str, str] = {}
+    for (symbol, client, _), value in zip(calls, values, strict=True):
+        if isinstance(value, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise value
+
+        if isinstance(value, BaseException):
+            failed.setdefault(symbol, f"{client.exchange}: {error_detail(value)}")
+            continue
+
+        read.append((symbol, cast(T, value)))
+
+    return read, failed
 
 
 def calc_total_from_pct(balances: list[tuple[str, float]], leverage: int, pct: float) -> Decimal:
@@ -258,7 +295,8 @@ class DeltaStrategy:
 
         # 2. Pick symbols (markets) and build full trading plan
         duration = int(self.cfg.trade_duration.sample())
-        tradeable = await self._tradeable_symbols(duration)
+        exp_usd = self.get_trade_size(was_bals)  # drawn before the filters: they size against it
+        tradeable = await self._tradeable_symbols(duration, exp_usd)
         if len(tradeable) < self.cfg.symbols_per_trade:
             logger.warning(
                 f"Only {len(tradeable)}/{self.cfg.symbols_per_trade} symbols are tradeable "
@@ -267,7 +305,6 @@ class DeltaStrategy:
             return False
 
         symbols = random.sample(tradeable, self.cfg.symbols_per_trade)
-        exp_usd = self.get_trade_size(was_bals)
         trades = await plan_delta_trades(
             accounts, symbols, exp_usd, self.cfg.leverage, was_bals.items(), self.cfg.long_exchange
         )
@@ -351,7 +388,7 @@ class DeltaStrategy:
         for n in range(self.cfg.trade_parts, 1, -1):
             try:
                 parts = [part for trade in trades for part in trade.split(n)]
-            except ValueError:  # fewer lots than parts
+            except PartsTooSmall:  # fewer lots than parts; an invalid plan must not step down
                 continue
 
             if not any([await part.below_min() for part in parts]):
@@ -418,10 +455,15 @@ class DeltaStrategy:
         ]
         return all(await asyncio.gather(*checks))
 
-    async def _tradeable_symbols(self, duration: int) -> list[str]:
-        if self.cfg.market_hours == MarketHoursMode.OFF:
-            return list(dict.fromkeys(self.cfg.symbols))
+    async def _tradeable_symbols(self, duration: int, total_usd: Decimal) -> list[str]:
+        symbols = list(dict.fromkeys(self.cfg.symbols))
+        if self.cfg.market_hours != MarketHoursMode.OFF:
+            symbols = await self._open_symbols(symbols, duration)
 
+        # After the market filter: a closed market has no lot to read, and no symbol to size.
+        return await self._lot_compatible_symbols(symbols, total_usd)
+
+    async def _open_symbols(self, symbols: list[str], duration: int) -> list[str]:
         now = datetime.now(UTC)
         limit_wait = self.cfg.limit_wait_budget if self.cfg.use_limit else 0
         drift = limit_wait * 2
@@ -438,7 +480,79 @@ class DeltaStrategy:
             ok_close = await client.is_symbol_tradeable(symbol, close_at)
             return ok_open and ok_close
 
-        return await filter_exchange_symbols(self.accounts, self.cfg.symbols, check)
+        return await filter_exchange_symbols(self.accounts, symbols, check)
+
+    async def _lot_compatible_symbols(self, symbols: list[str], total_usd: Decimal) -> list[str]:
+        """Keep symbols whose venues' lot grids carry a basket step this trade size can use.
+
+        A pool on one exchange has nothing to reconcile and reads nothing here: every client in
+        this repo reads the lot from a market record keyed by the symbol alone, so its accounts
+        share one grid per market by construction, and the basket step is that grid's own lot.
+        Only a pool mixing venues can hold grids that reject each other, and there the lot is read
+        once per exchange, as every other fan-out in `strategy/` does.
+
+        Grids that cannot carry the configured size are a problem for that symbol alone, so it is
+        dropped here instead of failing planning every cycle and backing the whole bot off. A
+        venue that cannot answer for one market drops the same way, with the API's own words in
+        the log: a market that is merely closed must not cost a cycle that has symbols to trade.
+        """
+        venues = unique_exchange_clients(self.accounts)
+        if len(venues) < 2:
+            return symbols  # one exchange, one grid per market: nothing to reconcile
+
+        calls = [(symbol, acc, acc.get_lot_size(symbol)) for symbol in symbols for acc in venues]
+        lots, dropped = await _read_markets(calls)
+
+        grids: dict[str, list[Decimal]] = {}
+        for symbol, lot in lots:
+            grids.setdefault(symbol, []).append(lot)
+
+        steps: dict[str, Decimal] = {}
+        for symbol, symbol_lots in grids.items():
+            if symbol in dropped:
+                continue  # a venue did not answer, so these are not the whole pool's grids
+
+            try:
+                steps[symbol] = basket_lot_size(symbol_lots)
+            except PlanError as e:
+                dropped[symbol] = str(e)
+
+        priced, unpriced = await self._coarse_steps(steps, grids)
+        dropped.update(unpriced)
+        if priced:
+            leg_usd = smallest_leg_usd(total_usd, self.cfg.symbols_per_trade, len(self.accounts))
+            limit_usd = leg_usd * SIZE_OVERSHOOT_LIMIT * 2  # half a step is the worst leg error
+            for symbol, step, step_usd in priced:
+                # Past that the lightest leg rounds off its planned size, to one lot or to zero,
+                # and `load_qtys` refuses the plan — every cycle, for a configured symbol.
+                if step_usd > limit_usd:
+                    dropped[symbol] = f"step {step} = {step_usd:.2f} USD vs {leg_usd:.2f} USD leg"
+
+        if dropped:
+            details = "; ".join(f"{symbol}: {why}" for symbol, why in dropped.items())
+            logger.warning(f"Symbols not tradeable across venues — {details}")
+
+        return [symbol for symbol in symbols if symbol not in dropped]
+
+    async def _coarse_steps(
+        self, steps: dict[str, Decimal], grids: dict[str, list[Decimal]]
+    ) -> tuple[list[tuple[str, Decimal, Decimal]], dict[str, str]]:  # [(symbol, step, step usd)]
+        """Price the basket steps that are coarser than some venue's own grid.
+
+        A step equal to every venue's lot rounds each leg as its own venue does and needs no
+        price. A coarser step lifts the legs on the finer venues by up to half a step, which
+        `load_qtys` bounds by each leg's own lot, so that step is measured against the trade size.
+        A price this filter cannot read drops its symbol, exactly as an unreadable lot does.
+        """
+        coarse = [symbol for symbol, step in steps.items() if step > min(grids[symbol])]
+        if not coarse:
+            return [], {}
+
+        # One price per symbol from one account: a cross-venue basis is ~0.03%, immaterial here.
+        acc = self.accounts[0]
+        prices, unpriced = await _read_markets([(x, acc, acc.get_price(x)) for x in coarse])
+
+        return [(x, steps[x], steps[x] * price) for x, price in prices], unpriced
 
     def basket_combined_roi(self, summaries: list[DeltaTradeSummary]) -> Decimal | None:
         total_pnl = sum((s.total_pnl for s in summaries), Decimal(0))

@@ -18,7 +18,7 @@ from lib.logger import logger
 
 from .cycle import CycleBudget, DeltaStrategy
 from .models import AppConfig, Position, TradeConfig, TradingClient
-from .symbols import ensure_exchange_symbols
+from .symbols import ensure_exchange_symbols, unique_exchange_clients
 
 
 def _env_enabled(name: str) -> bool:
@@ -175,12 +175,36 @@ async def _check_accounts(accs: Sequence[TradingClient]) -> None:
 
 
 async def _check_symbols(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
-    available = await accs[0].get_symbols()
-    canonical = {symbol.casefold(): symbol for symbol in available}
+    # Canonical names come from every venue in the pool, not only the first account's: a market
+    # paused on one venue is still listed by the other. The same one-account-per-exchange set is
+    # used here and by the ensure_exchange_symbols check below.
+    venues = unique_exchange_clients(accs)
+    results = await asyncio.gather(*[acc.get_symbols() for acc in venues], return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+
+    broken = [f"{a.exchange}: {r}" for a, r in zip(venues, results) if isinstance(r, Exception)]
+    if broken:
+        raise AppError(f"Cannot list markets: {'; '.join(broken)}")
+
+    # One configured spelling has to work on every venue. A name every venue lists verbatim is
+    # kept, so a venue listing two markets that differ only by case trades the one configured.
+    # Any other name is resolved through the map: a verbatim match on one venue must not keep a
+    # casing the next venue rejects (some clients match case-sensitively, others such as N1 and
+    # Rise accept any). First listing wins a casefold collision, deliberately: Lighter sorts
+    # get_symbols by 24h volume, so that is the busier market of the two.
+    listings = [r for r in results if not isinstance(r, BaseException)]
+    canonical: dict[str, str] = {}
+    for listing in listings:
+        for symbol in listing:
+            canonical.setdefault(symbol.casefold(), symbol)
+
     symbols = [
-        symbol if symbol in available else canonical.get(symbol.casefold(), symbol)
+        symbol if all(symbol in x for x in listings) else canonical.get(symbol.casefold(), symbol)
         for symbol in cfg.symbols
     ]
+    unlisted: set[tuple[str, str]] = set()
 
     async def symbol_exists(acc: TradingClient, symbol: str) -> bool:
         # The market list needs no quote, so markets closed for their trading hours pass too.
@@ -188,9 +212,14 @@ async def _check_symbols(cfg: TradeConfig, accs: Sequence[TradingClient]) -> Non
             return True
 
         await acc.get_lot_size(symbol)  # symbols a client resolves without listing them
+        unlisted.add((acc.exchange, symbol))
         return True
 
     await ensure_exchange_symbols(accs, symbols, symbol_exists)
+    if unlisted:  # e.g. paused on that venue: cycles skip it, so the pool can sit idle on it
+        pairs = ", ".join(f"{exchange} {symbol}" for exchange, symbol in sorted(unlisted))
+        logger.warning(f"Not listed as active, may be untradeable: {pairs}")
+
     cfg.symbols = symbols
 
 

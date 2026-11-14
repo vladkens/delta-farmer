@@ -1,19 +1,61 @@
 import asyncio
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import cast
 
 from lib.logger import logger
 from lib.utils import find_safe_pair, round_to_tick_size
 
-from .execution import fill_limit_order, wait_for_entry_quality
+from .execution import fill_limit_order, wait_for_legs_entry_quality
 from .models import Position, Side, TradeConfig, TradingClient, opposite_side, usd_to_qty
 
 USD_TICK = Decimal("0.01")
 SAFE_PCT = Decimal("0.96")  # leave 4% margin to avoid liquidation on leverage rounding
 SIZE_DRIFT_LIMIT = Decimal("0.05")
 QTY_IMBALANCE_WARN_USD = Decimal("0.10")
+# A leg may send at most this much more than it planned: find_safe_pair sizes every leg to 90% of
+# its account's margin, so a 10% overshoot still fits, and more is rejected for margin mid-open.
+SIZE_OVERSHOOT_LIMIT = Decimal("0.10")
+
+
+class PlanError(RuntimeError):
+    """Plan cannot be traded as planned. Raised while planning, before any order is sent."""
+
+
+class PartsTooSmall(ValueError):
+    """Planned qty cannot be cut into this many parts; the caller may retry with fewer."""
+
+
+def basket_lot_size(lots: Sequence[Decimal]) -> Decimal:
+    """Finest step every leg's lot grid accepts: the exact least common multiple of the lots.
+
+    Nested grids (0.01 under 0.1) keep the coarsest lot, which is what a single venue uses.
+    Grids that only meet further out are still tradeable: 0.2 and 0.5 reject each other's lot
+    but both accept 1.0. Lots are arbitrary API decimals (Nado `size_increment`, Rise
+    `step_size`, Omni `qty_tick`, Pacifica `lot_size`), not powers of ten, so grids can also
+    meet many coarse lots out, where no normal trade size fits the step any more. Whether a step
+    is too coarse depends on price and trade size, so it is measured where those are known:
+    `DeltaStrategy._lot_compatible_symbols` before the cycle, `load_qtys` on the real plan.
+
+    Every failure here is a `PlanError`, including a lot that is not a positive finite number, so
+    one broken venue response costs its own symbol instead of the whole cycle.
+    """
+    if not lots:
+        raise PlanError("no lot sizes to size against")
+
+    # NaN would raise from the comparison below, Infinity from the int() further down.
+    bad = sorted(str(lot) for lot in lots if not lot.is_finite() or lot <= 0)
+    if bad:
+        raise PlanError(f"lot size must be a positive number, got {', '.join(bad)}")
+
+    # Every Decimal is n*10^e, so the lots scale to whole units and their LCM is exact.
+    scale = max(-cast(int, lot.as_tuple().exponent) for lot in lots)
+    units = [int(lot.scaleb(scale)) for lot in lots]
+
+    return Decimal(math.lcm(*units)).scaleb(-scale)
 
 
 async def _fill_limit_order(
@@ -73,6 +115,18 @@ def calc_symbol_sizes(
         out[symbol] = (size, side)
 
     return out
+
+
+def smallest_leg_usd(total_usd: Decimal, symbols_per_trade: int, accounts: int) -> Decimal:
+    """Smallest leg notional a cycle of this basket size can plan.
+
+    `calc_symbol_sizes` splits the basket across the symbols, then `find_safe_pair` gives the prime
+    account half of each symbol's size and splits the other half across the rest, with ±10% jitter.
+    """
+    names = [str(i) for i in range(symbols_per_trade)]
+    per_symbol = min(size for size, _ in calc_symbol_sizes(total_usd, names, "bid").values())
+
+    return per_symbol * Decimal("0.5") / max(accounts - 1, 1)
 
 
 async def plan_delta_trades(
@@ -168,13 +222,37 @@ class DeltaTrade:
     def legs(self) -> list[DeltaLeg]:
         return [self.lead] + self.rest
 
+    def check_plan(self) -> None:
+        """Every leg tradeable and the basket flat in base qty. Must hold before any order."""
+        zero = [leg.client.name for leg in self.legs if leg.qty <= 0]
+        if zero:
+            raise PlanError(f"{self.symbol}: size is too small to trade on {', '.join(zero)}")
+
+        bid = sum(leg.qty for leg in self.legs if leg.side == "bid")
+        ask = sum(leg.qty for leg in self.legs if leg.side == "ask")
+
+        if bid != ask:
+            raise PlanError(
+                f"{self.symbol}: qty imbalance {bid - ask}, basket is not delta-neutral "
+                f"({bid} bid vs {ask} ask)"
+            )
+
     def split(self, parts: int) -> list["DeltaTrade"]:
         """Plan equal entry parts. Each part's lead equals its hedges, so every part is neutral."""
+        self.check_plan()  # also for one part: an unbalanced basket must never reach an order
+
+        # Each part's lead is built as the sum of that part's hedges, which is neutral only while
+        # the lead is the only leg on its side. `check_plan`'s bid total == ask total is weaker:
+        # it holds for baskets this split would plan directional, so check the shape here too.
+        crowd = [leg.client.name for leg in self.rest if leg.side == self.lead.side]
+        if crowd:
+            raise PlanError(
+                f"{self.symbol}: lead cannot share its {self.lead.side} side with "
+                f"{', '.join(crowd)}; parts are sized from the hedges"
+            )
+
         if parts == 1:
             return [self]
-
-        if self.lead.qty != sum(leg.qty for leg in self.rest):
-            raise ValueError(f"{self.symbol}: legs are unbalanced, cannot split into parts")
 
         def part(leg: DeltaLeg, qty: Decimal) -> DeltaLeg:
             return DeltaLeg(leg.client, leg.side, leg.size_usd * qty / leg.qty, qty)
@@ -184,7 +262,7 @@ class DeltaTrade:
         for i in range(parts):
             qtys = [qty[i] for qty in rest_parts]
             if not all(qtys):
-                raise ValueError(f"{self.symbol}: size is too small for {parts} parts")
+                raise PartsTooSmall(f"{self.symbol}: size is too small for {parts} parts")
 
             lead = part(self.lead, sum(qtys, Decimal(0)))
             rest = [part(leg, qty) for leg, qty in zip(self.rest, qtys)]
@@ -198,54 +276,69 @@ class DeltaTrade:
             leg.qty = sum((p.legs[i].qty for p in parts), Decimal(0))
             leg.size_usd = sum((p.legs[i].size_usd for p in parts), Decimal(0))
 
-    async def _common_lot_size(self) -> Decimal:
-        """The lead's lot, or the coarsest lot when the legs sit on more than one exchange.
-
-        Accounts on one exchange share its lot grid, so only the lead's lot is read, as before.
-        Lighter RH and Core list some markets with different lots, and a qty on the finer grid
-        would be cut on the coarser one, leaving the pair unhedged. Nested grids (powers of ten)
-        accept the coarsest lot on every venue; other grids are refused before any order.
-        """
-        lead = self.lead.client
-        lot = await lead.get_lot_size(self.symbol)
-        others = {
-            x.client.exchange: x.client for x in self.rest if x.client.exchange != lead.exchange
-        }
-        if not others:
-            return lot
-
-        lots = [lot, *await asyncio.gather(*[x.get_lot_size(self.symbol) for x in others.values()])]
-        coarsest = max(lots)
-        if any(coarsest % x for x in lots):
-            raise RuntimeError(
-                f"{self.symbol}: lot sizes {', '.join(map(str, lots))} share no step"
-            )
-
-        return coarsest
-
     async def load_qtys(self) -> None:
-        price = await self.lead.client.get_price(self.symbol)
-        lot_size = self.lot_size = await self._common_lot_size()
-        for leg in self.legs:
+        async def quote(leg: DeltaLeg) -> tuple[Decimal, Decimal]:
+            price, lot = await asyncio.gather(
+                leg.client.get_price(self.symbol), leg.client.get_lot_size(self.symbol)
+            )
+            return price, lot
+
+        legs = self.legs
+        quotes = await asyncio.gather(*[quote(leg) for leg in legs])
+        prices, lots = [price for price, _ in quotes], [lot for _, lot in quotes]
+
+        # Legs may sit on different venues: each sizes on its own price, the whole basket on one
+        # step every lot grid accepts, which keeps split() aligned on every venue.
+        lot_size = self.lot_size = basket_lot_size(lots)
+
+        for leg, price in zip(legs, prices):
             leg.qty = usd_to_qty(leg.size_usd, price, lot_size)
 
-        bid_qty = sum(leg.qty for leg in self.legs if leg.side == "bid")
-        ask_qty = sum(leg.qty for leg in self.legs if leg.side == "ask")
+        bid_qty = sum(leg.qty for leg in legs if leg.side == "bid")
+        ask_qty = sum(leg.qty for leg in legs if leg.side == "ask")
         delta = bid_qty - ask_qty  # positive → bid side is larger
 
         if delta != 0:
             larger_side = "bid" if delta > 0 else "ask"
-            last_leg = next(leg for leg in reversed(self.legs) if leg.side == larger_side)
-            usd_imbalance = abs(delta) * price
+            last_leg = next(leg for leg in reversed(legs) if leg.side == larger_side)
+            usd_imbalance = abs(delta) * prices[0]  # lead price: one scale for the whole basket
             if abs(delta) >= last_leg.qty:
-                logger.warning(
-                    f"qty imbalance {delta} ({usd_imbalance:.2f} USD) >= "
-                    f"last leg qty {last_leg.qty} — skipping adjustment"
+                # Leaving it unbalanced would hold a directional position for the whole trade:
+                # nothing downstream measures it, because every check reads these planned qtys.
+                raise PlanError(
+                    f"{self.symbol}: qty imbalance {delta} ({usd_imbalance:.2f} USD) does not fit "
+                    f"the last {larger_side} leg ({last_leg.qty}); size up or use a finer market"
                 )
-            else:
-                last_leg.qty -= abs(delta)
-                if usd_imbalance > QTY_IMBALANCE_WARN_USD:
-                    logger.debug(f"qty imbalance adjusted: {delta} qty = {usd_imbalance:.2f} USD")
+
+            last_leg.qty -= abs(delta)
+            if usd_imbalance > QTY_IMBALANCE_WARN_USD:
+                logger.debug(f"qty imbalance adjusted: {delta} qty = {usd_imbalance:.2f} USD")
+
+        # A leg trades whole basket lots, so its notional can sit up to one lot off the requested
+        # size. The exchange minimum, the plan log and the reported volume all have to use what
+        # will really be sent, not what was asked for.
+        wants = [leg.size_usd for leg in legs]
+        for leg, price in zip(legs, prices):
+            leg.size_usd = leg.qty * price
+
+        # Rounding to the basket step lifts a leg as readily as it drops it, and the overshoot is
+        # paid out of that leg's margin. Half of a leg's own lot is the most its venue's own grid
+        # can move it and is traded today; only what the shared basket step adds on top of that
+        # is refused here, so a single-venue basket can never reach this raise. The slack is each
+        # leg's own: a finer venue's leg must not borrow the coarse venue's lot.
+        over = [
+            f"{leg.client.name} {leg.size_usd:.2f}/{want:.2f}"
+            for leg, want, price, lot in zip(legs, wants, prices, lots)
+            if leg.size_usd - want > max(want * SIZE_OVERSHOOT_LIMIT, lot / 2 * price)
+        ]
+        if over:
+            raise PlanError(
+                f"{self.symbol}: basket step {lot_size} sends more than "
+                f"{SIZE_OVERSHOOT_LIMIT:.0%} over the planned size ({', '.join(over)} USD); "
+                "size up or use a finer market"
+            )
+
+        self.check_plan()
 
     async def log_plan(self) -> None:
         total_usd = sum(leg.size_usd for leg in self.legs)
@@ -263,6 +356,8 @@ class DeltaTrade:
         await asyncio.gather(*[_ensure(leg.client) for leg in self.legs])
 
     async def below_min(self) -> list[tuple[DeltaLeg, Decimal]]:
+        """Legs whose order notional misses their own venue minimum. `size_usd` is qty x price
+        once `load_qtys` has run, so this measures the order, not the requested size."""
         mins = await asyncio.gather(*[x.client.get_min_trade_usd(self.symbol) for x in self.legs])
         return [(act, val) for act, val in zip(self.legs, mins) if act.size_usd < val]
 
@@ -279,9 +374,8 @@ class DeltaTrade:
         raise RuntimeError(f"Trade size below minimum for: {failed_accs}")
 
     async def gate(self, cfg: TradeConfig) -> bool:
-        rs = await wait_for_entry_quality(
-            self.lead.client, self.symbol, [(leg.side, leg.qty) for leg in self.legs], cfg
-        )
+        legs = [(leg.client, leg.side, leg.qty) for leg in self.legs]
+        rs = await wait_for_legs_entry_quality(legs, self.symbol, cfg)
         return rs is not None
 
     async def open(self, cfg: TradeConfig) -> bool:
@@ -329,7 +423,7 @@ class DeltaTrade:
     async def reduce(self, cfg: TradeConfig, remaining: int, use_limit=False) -> None:
         """Close 1/remaining of each leg's position; a final close() takes the exact rest."""
 
-        # Legs on several exchanges opened on their common lot and reduce on it too: a finer-lot
+        # Legs on several exchanges opened on the basket step and reduce on it too: a finer-lot
         # leg rounding on its own lot would leave the pair directional.
         mixed = len({leg.client.exchange for leg in self.legs}) > 1
 

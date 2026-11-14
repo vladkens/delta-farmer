@@ -8,7 +8,12 @@ from lib.errors import AppError
 from .models import TradingClient
 
 
-def _unique_exchange_clients(accs: Sequence[TradingClient]) -> list[TradingClient]:
+def unique_exchange_clients(accs: Sequence[TradingClient]) -> list[TradingClient]:
+    """One account per exchange, first seen: market data is per exchange, not per account.
+
+    Every client reads lots, ticks, listings and market hours from a shared market record keyed by
+    the symbol alone, so one account per exchange answers for all of them.
+    """
     by_exchange: dict[str, TradingClient] = {}
     for acc in accs:
         by_exchange.setdefault(acc.exchange, acc)
@@ -21,7 +26,7 @@ async def _run_exchange_symbols[T](
     fn: Callable[[TradingClient, str], Awaitable[T]],
 ) -> list[tuple[TradingClient, str, T | BaseException]]:
     unique_symbols = list(dict.fromkeys(symbols))
-    pairs = [(acc, symbol) for acc in _unique_exchange_clients(accs) for symbol in unique_symbols]
+    pairs = [(acc, symbol) for acc in unique_exchange_clients(accs) for symbol in unique_symbols]
     values = await asyncio.gather(
         *[fn(acc, symbol) for acc, symbol in pairs],
         return_exceptions=True,

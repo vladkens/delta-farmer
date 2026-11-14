@@ -284,6 +284,8 @@ entry_gate_wait = "5m"
 entry_gate_poll = "3s"
 ```
 
+The cost is measured with every leg on its own exchange's order book: accounts on one exchange share one book, and a pool that mixes exchanges includes the basis between their books. A basis in the basket's favour counts as a gain and passes. When the cost stays above `max_entry_spread_pct` (0.25% by default) for `entry_gate_wait`, the cycle is skipped and logs one line, `BTC gate skip spread=0.41% timeout=300s`.
+
 ### Entering and exiting in parts
 
 Large positions can be opened and closed in several equal parts instead of one order, which reduces the price impact of each order:
