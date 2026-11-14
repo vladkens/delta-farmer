@@ -21,10 +21,12 @@ import pickle
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from clients.lighter import VOLUME_START_TIMESTAMP, LighterRobinhoodClient
 from clients.n1 import N1Client
 from clients.nado import NadoClient
 from clients.omni import OmniClient
@@ -34,10 +36,15 @@ from lib.table import AutoTable, Column
 from lib.utils import to_period_week
 
 CACHE = os.path.join(os.path.dirname(__file__), "..", ".cache")
+# A prefix that also matches another exchange's caches: `lighter_` ⊃ `lighter_core_`.
+NESTED_CACHES = {"lighter_": ("lighter_core_",)}
 
 # Closed exchanges: their clients are removed, but cached history still counts.
 ETHEREAL_GENESIS = datetime(2025, 12, 18, tzinfo=UTC)
 HYENA_GENESIS = datetime(2025, 12, 4, tzinfo=UTC)
+# Lighter Core counts from the Robinhood campaign start, like `apps/lighter.py`: a wallet's
+# earlier manual trading there is not farming.
+LIGHTER_CORE_START = datetime.fromtimestamp(VOLUME_START_TIMESTAMP, tz=UTC)
 
 
 # MARK: Shared utils
@@ -56,7 +63,13 @@ def glob_cache(prefix: str, suffix: str) -> list[str]:
         files = os.listdir(CACHE)
     except FileNotFoundError:
         return []
-    return [os.path.join(CACHE, f) for f in files if f.startswith(prefix) and f.endswith(suffix)]
+
+    nested = NESTED_CACHES.get(prefix, ())
+    return [
+        os.path.join(CACHE, f)
+        for f in files
+        if f.startswith(prefix) and f.endswith(suffix) and not f.startswith(nested)
+    ]
 
 
 def parse_dt(s) -> datetime:
@@ -81,6 +94,12 @@ def hyena_week(dt: datetime) -> str:
 def hyena_reward_start(r: dict) -> datetime:
     n = int(r["id"].removeprefix("reward-week-"))  # "reward-week-6"
     return HYENA_GENESIS + timedelta(weeks=n - 1)
+
+
+def lighter_core_week(dt: datetime) -> str:
+    # Core runs no points campaign, so it has no week numbering of its own: bucket by ISO week,
+    # in the same label shape the report parses. Keep in sync with apps/lighter.py.
+    return _iso_label(_to_iso_week(dt))
 
 
 # MARK: Stats extractors (vol + burn, native periods)
@@ -183,6 +202,41 @@ def hyena_stats() -> Stats:
     return out
 
 
+def _lighter_stats(
+    prefix: str, period_fn: Callable[[datetime], str], start: datetime | None = None
+) -> Stats:
+    out: Stats = {}
+    for path in glob_cache(prefix, "_trades.pkl"):
+        for r in load_pkl(path):
+            dt = parse_dt(r["created_at"])
+            if start is not None and dt < start:
+                continue
+
+            lbl = period_fn(dt)
+            vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
+            vol += Decimal(str(r["volume"]))
+            burn += Decimal(str(r["fee"])) - Decimal(str(r["realized_pnl"]))
+            out[lbl] = (vol, burn)
+    for path in glob_cache(prefix, "_funding.pkl"):
+        for r in load_pkl(path):
+            dt = parse_dt(r["created_at"])
+            if start is not None and dt < start:
+                continue
+
+            lbl = period_fn(dt)
+            vol, burn = out.get(lbl, (Decimal(0), Decimal(0)))
+            out[lbl] = (vol, burn - Decimal(str(r["change"])))
+    return out
+
+
+def lighter_stats() -> Stats:
+    return _lighter_stats("lighter_", LighterRobinhoodClient.to_week_label)
+
+
+def lighter_core_stats() -> Stats:
+    return _lighter_stats("lighter_core_", lighter_core_week, LIGHTER_CORE_START)
+
+
 def rise_stats() -> Stats:
     out: Stats = {}
     for path in glob_cache("rise_", "_trades.pkl"):
@@ -259,6 +313,30 @@ def hyena_pts() -> Pts:
     return dict(out)
 
 
+def lighter_pts() -> Pts:
+    # The leaderboard exposes total points, without a history to assign to periods.
+    return {}
+
+
+def lighter_core_pts() -> Pts:
+    # Core runs no points campaign.
+    return {}
+
+
+def lighter_total_pts() -> Decimal | None:
+    accounts = [path.removesuffix("_trades.pkl") for path in glob_cache("lighter_", "_trades.pkl")]
+    if not accounts:
+        return None
+    total = Decimal(0)
+    for account in accounts:
+        path = account + "_points_total.pkl"
+        records = load_pkl(path) if os.path.exists(path) else []
+        if len(records) != 1 or records[0].get("points") is None:
+            return None  # Do not present a partial account total as the full balance.
+        total += Decimal(str(records[0]["points"]))
+    return total
+
+
 def rise_pts() -> Pts:
     return _pts_by_period(
         "rise_", "_points.pkl", "start_window", ["points"], RiseClient.to_week_label
@@ -309,6 +387,21 @@ def hyena_burn_weeks() -> ISOData:
             dt = parse_dt(r["start_window"]) if "start_window" in r else hyena_reward_start(r)
             out[_to_iso_week(dt)][2] += Decimal(str(r.get("enaxPoints", 0)))
     return {k: (v[0], v[1], v[2]) for k, v in out.items()}
+
+
+def _lighter_burn_weeks(prefix: str, start: datetime | None = None) -> ISOData:
+    return {
+        week: (vol, burn, Decimal(0))
+        for week, (vol, burn) in _lighter_stats(prefix, _to_iso_week, start).items()
+    }
+
+
+def lighter_burn_weeks() -> ISOData:
+    return _lighter_burn_weeks("lighter_")
+
+
+def lighter_core_burn_weeks() -> ISOData:
+    return _lighter_burn_weeks("lighter_core_", LIGHTER_CORE_START)
 
 
 def nado_burn_weeks() -> ISOData:
@@ -389,11 +482,16 @@ def n1_burn_weeks() -> ISOData:
 
 # MARK: Exchange registry
 
+# These exchanges expose a current balance, not points earned in each period.
+CURRENT_POINTS: dict[str, Callable[[], Decimal | None]] = {"Lighter": lighter_total_pts}
+
 # current_period_fn=None → use pts > 0 as "completed" signal
 # current_period_fn=callable → no pts, filter out current/incomplete period
 EXCHANGES: list[tuple[str, Any, Any, Any | None]] = [
     ("Ethereal", ethereal_stats, ethereal_pts, None),
     ("Hyena", hyena_stats, hyena_pts, hyena_week),
+    ("Lighter", lighter_stats, lighter_pts, LighterRobinhoodClient.to_week_label),
+    ("Lighter Core", lighter_core_stats, lighter_core_pts, lighter_core_week),
     ("Nado", nado_stats, nado_pts, None),
     ("Omni", omni_stats, omni_pts, None),
     ("Pacifica", pacifica_stats, pacifica_pts, None),
@@ -404,6 +502,8 @@ EXCHANGES: list[tuple[str, Any, Any, Any | None]] = [
 BURN_EXCHANGES = [
     ("Ethereal", ethereal_burn_weeks),
     ("Hyena", hyena_burn_weeks),
+    ("Lighter", lighter_burn_weeks),
+    ("Lighter Core", lighter_core_burn_weeks),
     ("Nado", nado_burn_weeks),
     ("Omni", omni_burn_weeks),
     ("Pacifica", pacifica_burn_weeks),
@@ -413,6 +513,10 @@ BURN_EXCHANGES = [
 
 
 def _period_end_weeks(label: str) -> set[str]:
+    # An ISO-week label (Lighter Core) names its own year.
+    if m := re.match(r"^(\d{4}-W\d{2}) ", label):
+        return {m.group(1)}
+
     m = re.match(r"^(?:OFF|W\d+)\s+[A-Z][a-z]{2}\d{2}-([A-Z][a-z]{2})(\d{2})$", label)
     if not m:
         return set()
@@ -464,7 +568,7 @@ def _iso_label(iso_week: str) -> str:
     jan4 = datetime(year, 1, 4, tzinfo=UTC)
     monday = jan4 - timedelta(days=jan4.weekday()) + timedelta(weeks=week - 1)
     sunday = monday + timedelta(days=6)
-    return f"W{week:02d} {monday.strftime('%b%d')}-{sunday.strftime('%b%d')}"
+    return f"{iso_week} {monday.strftime('%b%d')}-{sunday.strftime('%b%d')}"
 
 
 def _parse_week_arg(s: str) -> str:
@@ -496,7 +600,9 @@ def _offset_week_from(weeks: set[str], week_arg: int) -> str | None:
 
 
 def _exchange_by_name(name: str):
-    return next((e for e in EXCHANGES if e[0].lower() == name.lower()), None)
+    # Spaces are optional, so a two-word name needs no quoting: `weekly.py lightercore`.
+    key = name.replace(" ", "").lower()
+    return next((e for e in EXCHANGES if e[0].replace(" ", "").lower() == key), None)
 
 
 def _parse_targets(targets: list[str], exchange: str | None) -> tuple[str | None, int | str | None]:
@@ -555,17 +661,32 @@ def _selected_weeks(
     return week, week
 
 
+def _sum_points(values: Iterable[Decimal | None]) -> Decimal | None:
+    total = Decimal(0)
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
+
+
+def _print_current_points(name: str) -> None:
+    points = CURRENT_POINTS[name]()
+    value = f"{points:,.1f}" if points is not None else "n/a"
+    print(f"  · {name} points: {value} (cached current total; no period history)")
+
+
 def _report_columns(*, grouped: bool) -> list[Column]:
     return [
         Column("Period", justify="left") if grouped else Column("Exchange", justify="left"),
         Column("Volume", "{:,.0f}", total=sum),
         Column("Burn", "{:,.2f}", total=sum),
-        Column("Points", "{:,.1f}", total=sum, grand_total=False),
+        Column("Points", "{:,.1f}", total=_sum_points, grand_total=False),
         Column(
             "$/pt",
             "{:,.4f}",
-            compute=lambda r: r["Burn"] / r["Points"],
-            guard=lambda r: r["Points"] > 0,
+            compute=lambda r: r["Burn"] / r["Points"] if r["Points"] is not None else None,
+            guard=lambda r: r["Points"] is None or r["Points"] > 0,
             grand_total=False,
         ),
         Column(
@@ -579,8 +700,8 @@ def _report_columns(*, grouped: bool) -> list[Column]:
 
 
 def _sort_report_rows(
-    rows: list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal]], sort: str
-) -> list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal]]:
+    rows: list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal | None]], sort: str
+) -> list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal | None]]:
     match sort:
         case "v" | "volume":
             return sorted(rows, key=lambda r: (r[3], r[0]), reverse=True)
@@ -606,7 +727,7 @@ def report_view(
         gtitle="Exchange",
     )
     any_data = False
-    rows: list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal]] = []
+    rows: list[tuple[str, list[str], Decimal, Decimal, Decimal, Decimal | None]] = []
 
     for name, stats_fn, pts_fn, _ in EXCHANGES:
         periods = stats_fn()
@@ -621,7 +742,12 @@ def report_view(
             )
         )
         extra_pts = bonus_pts(pts_map, set(labels)) if include_bonus else Decimal(0)
-        if not labels and not extra_pts:
+        current_pts = (
+            CURRENT_POINTS[name]()
+            if name in CURRENT_POINTS and from_week is None and to_week is None
+            else None
+        )
+        if not labels and not extra_pts and not current_pts:
             continue
 
         vol = sum(
@@ -632,7 +758,11 @@ def report_view(
             (periods.get(label, (Decimal(0), Decimal(0)))[1] for label in labels),
             Decimal(0),
         )
-        pts = sum((pts_map.get(label, Decimal(0)) for label in labels), Decimal(0)) + extra_pts
+        pts = (
+            current_pts
+            if name in CURRENT_POINTS
+            else sum((pts_map.get(label, Decimal(0)) for label in labels), Decimal(0)) + extra_pts
+        )
         rows.append((name, labels, extra_pts, vol, burn, pts))
         any_data = True
 
@@ -652,13 +782,17 @@ def report_view(
             tbl.subgroup(name)
             for label in labels:
                 period_vol, period_burn = periods.get(label, (Decimal(0), Decimal(0)))
-                tbl.add_row(label, period_vol, period_burn, pts_map.get(label, Decimal(0)))
+                period_pts = None if name in CURRENT_POINTS else pts_map.get(label, Decimal(0))
+                tbl.add_row(label, period_vol, period_burn, period_pts)
             if extra_pts:
                 tbl.add_row("Bonus", Decimal(0), Decimal(0), extra_pts)
         else:
             tbl.add_row(name, vol, burn, pts)
 
     tbl.print()
+    for name, *_ in rows:
+        if name in CURRENT_POINTS:
+            _print_current_points(name)
     return 0
 
 
@@ -692,12 +826,12 @@ def exchange_view(
         Column("Period", justify="left"),
         Column("Volume", "{:,.0f}", total=sum),
         Column("Burn", "{:,.2f}", total=sum),
-        Column("Points", "{:,.1f}", total=sum),
+        Column("Points", "{:,.1f}", total=_sum_points),
         Column(
             "$/pt",
             "{:,.4f}",
-            compute=lambda r: r["Burn"] / r["Points"],
-            guard=lambda r: r["Points"] > 0,
+            compute=lambda r: r["Burn"] / r["Points"] if r["Points"] is not None else None,
+            guard=lambda r: r["Points"] is None or r["Points"] > 0,
             grand_total=False,
         ),
         Column(
@@ -711,7 +845,7 @@ def exchange_view(
     any_data = False
     for lbl in available:
         vol, burn = periods.get(lbl, (Decimal(0), Decimal(0)))
-        pts = pts_map.get(lbl, Decimal(0))
+        pts = None if exch_name in CURRENT_POINTS else pts_map.get(lbl, Decimal(0))
         if not vol and not burn and not pts:
             continue
         tbl.add_row(lbl, vol, burn, pts)
@@ -726,6 +860,8 @@ def exchange_view(
         title = f"{exch_name} — {from_week or '...'}..{to_week or '...'}"
     print(title)
     tbl.print()
+    if exch_name in CURRENT_POINTS:
+        _print_current_points(exch_name)
     return 0
 
 

@@ -44,18 +44,28 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
         logger.info("No active positions")
         return
 
-    symbols = {pos.symbol for _, pos in entries}
     acc_map = {a.name: a for a in accs}
+    acc_sym_pairs = list(dict.fromkeys((acc_name, pos.symbol) for acc_name, pos in entries))
+
+    # A mark is market data, identical for every account on one venue, so a pool that mixes
+    # venues needs one quote per (exchange, symbol) - not per account, which would multiply the
+    # same request by the number of accounts holding it. It also keeps both legs of a hedged pair
+    # on one quote, so they go stale together and the pair never reads as net long or short.
+    price_accs: dict[tuple[str, str], TradingClient] = {}
+    for acc_name, symbol in acc_sym_pairs:
+        price_accs.setdefault((acc_map[acc_name].exchange, symbol), acc_map[acc_name])
 
     prices_raw = await asyncio.gather(
-        *[accs[0].get_price(s) for s in symbols], return_exceptions=True
+        *[acc.get_price(symbol) for (_, symbol), acc in price_accs.items()], return_exceptions=True
     )
-    prices: dict[str, Decimal] = {}
-    for s, p in zip(symbols, prices_raw):
-        if not isinstance(p, BaseException):
-            prices[s] = p
+    prices: dict[tuple[str, str], Decimal] = {}
+    for (exchange, symbol), p in zip(price_accs, prices_raw):
+        if isinstance(p, BaseException):
+            logger.warning(f"{exchange}: no mark price for {symbol}: {p}")
+            continue  # the rows on that market show their entry price, flagged as n/a
 
-    acc_sym_pairs = list({(acc_name, pos.symbol) for acc_name, pos in entries})
+        prices[(exchange, symbol)] = p
+
     lev_raw = await asyncio.gather(
         *[acc_map[a].get_leverage(s) for a, s in acc_sym_pairs], return_exceptions=True
     )
@@ -72,7 +82,9 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
     total_value = Decimal(0)
     total_entry_cost = Decimal(0)
     for acc_name, pos in entries:
-        mark = prices.get(pos.symbol, pos.entry_price)
+        quote = prices.get((acc_map[acc_name].exchange, pos.symbol))
+        stale = quote is None  # no quote: value the row at its entry and say so in the table
+        mark = pos.entry_price if quote is None else quote
         sign = Decimal(1) if pos.side == "bid" else Decimal(-1)
         signed_qty = pos.size * sign
         entry_cost = pos.size * pos.entry_price
@@ -88,7 +100,8 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
         total_pnl += pnl
         total_value += value
         total_entry_cost += entry_cost
-        rows.append((acc_name, pos.symbol, signed_qty, pos.entry_price, mark, value, pnl, roi))
+        row = (acc_name, pos.symbol, signed_qty, pos.entry_price, mark, value, pnl, roi, stale)
+        rows.append(row)
 
     tc = "green" if total_pnl >= 0 else "red"
     total_roi = total_pnl / total_entry_cost if total_entry_cost else Decimal(0)
@@ -108,7 +121,7 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
     tbl.add_column("MM%", justify="right")
 
     seen_accs: set[str] = set()
-    for acc_name, symbol, signed_qty, entry, mark, value, pnl, roi in rows:
+    for acc_name, symbol, signed_qty, entry, mark, value, pnl, roi, stale in rows:
         first = acc_name not in seen_accs
         seen_accs.add(acc_name)
 
@@ -130,10 +143,12 @@ async def print_positions(accs: Sequence[TradingClient]) -> None:
             symbol,
             f"[{qc}]{signed_qty:+.4f}[/{qc}]",
             f"{entry:,.2f}",
-            f"{mark:,.2f}",
+            # Without a quote the row is valued at entry, so its mark, P/L and ROI are unknown
+            # rather than zero: showing them as numbers would read as a flat live position.
+            "n/a" if stale else f"{mark:,.2f}",
             f"{value:,.2f}",
-            f"[{c}]{pnl:+,.2f}[/{c}]",
-            f"[{c}]{roi:+.2%}[/{c}]",
+            "n/a" if stale else f"[{c}]{pnl:+,.2f}[/{c}]",
+            "n/a" if stale else f"[{c}]{roi:+.2%}[/{c}]",
             f"{balances.get(acc_name, Decimal(0)):,.2f}" if first else "-",
             (f"[{mmc}]{mm_usage:.1%}[/{mmc}]" if mm_usage is not None else "n/a") if first else "-",
         )
@@ -209,6 +224,33 @@ def _check_cfg(cfg: TradeConfig, accs: Sequence[TradingClient]):
             f"symbols_per_trade={cfg.symbols_per_trade} requires exactly "
             f"{cfg.symbols_per_trade} symbols, got {len(cfg.symbols)}"
         )
+
+    if cfg.long_exchange is not None:
+        venues = list(dict.fromkeys(a.exchange for a in accs))
+        if cfg.long_exchange not in venues:
+            raise AppError(
+                f"long_exchange={cfg.long_exchange} matches no account here: {', '.join(venues)}"
+            )
+        # calc_symbol_sizes gives half the symbols the opposite side, which would put both venues
+        # on both sides of the basket and lose the boost on the symbols that flipped.
+        if cfg.symbols_per_trade > 1:
+            raise AppError(
+                f"long_exchange requires symbols_per_trade=1, got {cfg.symbols_per_trade}"
+            )
+        # Accounts come in pairs, one leg on long_exchange and one elsewhere. Sizing is half per
+        # leg, so any other shape would plan a directional basket; it is refused here, before any
+        # account is touched.
+        for pair in batched(accs, 2):
+            if len(pair) != 2 or [a.exchange for a in pair].count(cfg.long_exchange) != 1:
+                legs = ", ".join(f"{a.name} ({a.exchange})" for a in pair)
+                raise AppError(
+                    f"long_exchange={cfg.long_exchange} needs one leg there and one elsewhere "
+                    f"per pair, got {legs}"
+                )
+        # Each pair is one group, in config order and never regrouped (the config refuses
+        # regroup_interval), so legs of different wallets never trade together.
+        cfg.group_size = 2 if n > 2 else None
+        return cfg, accs
 
     if cfg.group_size is None and n > 5:
         raise AppError("Single-group mode supports up to 5 enabled accounts")

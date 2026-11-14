@@ -202,7 +202,7 @@ class DeltaStrategy:
         symbols = random.sample(tradeable, self.cfg.symbols_per_trade)
         exp_usd = self.get_trade_size(was_bals)
         trades = await plan_delta_trades(
-            accounts, symbols, exp_usd, self.cfg.leverage, was_bals.items()
+            accounts, symbols, exp_usd, self.cfg.leverage, was_bals.items(), self.cfg.long_exchange
         )
         if trades is None:
             logger.error("No valid account combination found for trading.")

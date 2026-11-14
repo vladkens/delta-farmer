@@ -7,6 +7,7 @@ use_limit = true
 # market_hours = "auto"  # auto=open window, strict=open+close windows, off=disabled
 # limit_wait_retries = 99  # Extra limit_wait windows on stable BBO; 0 = disabled
 first_as_prime = true  # true = first account is always prime; false = random each cycle
+# long_exchange = "lighter"  # Lighter RH + Core hedge: exchange with the long leg (see README)
 
 # trade_size_pct = 0.5                          # Size as fraction of balance
 trade_size_usd = { min = 140, max = 160 }       # Total size in USD at the leverage above (split 50% prime / 50% hedge)

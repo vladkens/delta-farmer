@@ -6,6 +6,8 @@ from typing import cast
 from unittest.mock import ANY, AsyncMock, Mock
 
 import pytest
+from rich.console import Console
+from rich.table import Table
 
 from lib.errors import AppError
 from strategy.cycle import Balances, DeltaStrategy
@@ -19,7 +21,7 @@ from strategy.models import (
     StrategyConfig,
     TradingClient,
 )
-from strategy.runner import _check_cfg, _check_symbols, _prepare_groups
+from strategy.runner import _check_cfg, _check_symbols, _prepare_groups, print_positions
 from strategy.trade import DeltaLeg, DeltaTrade, DeltaTradeSummary
 
 
@@ -53,9 +55,10 @@ def position(symbol: str, side: Side, size: str, entry: str = "50000") -> Positi
 class Client:
     exchange = "mock"
 
-    def __init__(self, name: str, *, price: str = "50000"):
+    def __init__(self, name: str, *, price: str = "50000", lot: str = "0.001"):
         self.name = name
         self.price = Decimal(price)
+        self.lot = Decimal(lot)
         self.balance_value = Decimal(1000)
         self.positions_value: list[Position] = []
         self.tradeable = True
@@ -76,7 +79,7 @@ class Client:
         return OrderBook.build(bids=[(self.price - 1, 10)], asks=[(self.price + 1, 10)])
 
     async def get_lot_size(self, symbol: str) -> Decimal:
-        return Decimal("0.001")
+        return self.lot
 
     async def get_tick_size(self, symbol: str) -> Decimal:
         return Decimal(1)
@@ -289,6 +292,35 @@ async def test_trade_min_size():
         await trade(lead, rest).check_min_sizes()
 
 
+def xrp_pair(rh: Client, core: Client) -> DeltaTrade:
+    return DeltaTrade(
+        "XRP",
+        DeltaLeg(cast(TradingClient, rh), "bid", Decimal("1001")),
+        [DeltaLeg(cast(TradingClient, core), "ask", Decimal("1001"))],
+    )
+
+
+async def test_venues_with_different_lots_size_on_the_coarsest():
+    # XRP: Lighter RH trades 0.01, Core whole units. 500.50 on RH's lot would be cut to 500 on
+    # Core and leave half an XRP unhedged; both legs must trade the same whole-unit qty.
+    rh, core = Client("rh", price="2", lot="0.01"), Client("core", price="2", lot="1")
+    core.exchange = "lighter_core"
+    plan = xrp_pair(rh, core)
+
+    await plan.load_qtys()
+
+    assert plan.lot_size == Decimal(1)
+    assert [leg.qty for leg in plan.legs] == [Decimal(500), Decimal(500)]
+
+
+async def test_venues_whose_lots_do_not_nest_are_refused():
+    rh, core = Client("rh", price="2", lot="0.5"), Client("core", price="2", lot="0.2")
+    core.exchange = "lighter_core"
+
+    with pytest.raises(RuntimeError, match="share no step"):
+        await xrp_pair(rh, core).load_qtys()
+
+
 async def test_limit_open(monkeypatch):
     lead, rest = Client("lead"), Client("rest")
     cfg = make_cfg(use_limit=True)
@@ -391,6 +423,144 @@ async def test_symbols_reject_exchange():
 
     with pytest.raises(AppError, match="ETH is not available on second"):
         await _check_symbols(make_cfg(symbols=["BTC", "ETH"]), clients)
+
+
+class VenueClient(Client):
+    """One venue of a mixed pool: it lists, quotes and sizes only its own markets."""
+
+    def __init__(
+        self, name: str, exchange: str, prices: dict[str, str], unlisted: tuple[str, ...] = ()
+    ):
+        super().__init__(name)
+        self.exchange = exchange
+        self.prices = {symbol: Decimal(price) for symbol, price in prices.items()}
+        self.unlisted = unlisted  # markets this venue sizes but does not list, e.g. paused ones
+        self.price_calls: list[str] = []
+        self.listing_calls = 0
+
+    async def get_price(self, symbol: str) -> Decimal:
+        self.price_calls.append(symbol)
+        if symbol not in self.prices:
+            raise RuntimeError(f"No quote for {symbol} on {self.exchange}")
+
+        return self.prices[symbol]
+
+    async def get_symbols(self) -> list[str]:
+        self.listing_calls += 1
+        return list(self.prices)
+
+    async def get_lot_size(self, symbol: str) -> Decimal:
+        if symbol not in self.prices and symbol not in self.unlisted:
+            raise RuntimeError(f"Unknown symbol {symbol} on {self.exchange}")
+
+        return self.lot
+
+
+POSITION_COLUMNS = [
+    "Account",
+    "Symbol",
+    "Qty",
+    "Entry",
+    "Mark",
+    "Value",
+    "PnL",
+    "ROI",
+    "Balance",
+    "MM%",
+]
+
+
+async def row_cells(accs: list[Client], monkeypatch) -> dict[tuple[str, str], dict[str, str]]:
+    """Render the positions table and map each row's (account, symbol) to its cells by column."""
+    tables: list[Table] = []
+    monkeypatch.setattr("strategy.runner.rprint", tables.append)
+    await print_positions(cast(list[TradingClient], accs))
+
+    console = Console(width=200, no_color=True)
+    with console.capture() as capture:
+        console.print(tables[0])
+
+    lines = [line.split() for line in capture.get().splitlines() if line.split()]
+    assert lines[0] == POSITION_COLUMNS  # a cell with an inner space would shift every column
+
+    names = {acc.name for acc in accs}
+    rows = [line for line in lines if line[0] in names]
+    assert all(len(row) == len(POSITION_COLUMNS) for row in rows)
+    return {(row[0], row[1]): dict(zip(POSITION_COLUMNS, row, strict=True)) for row in rows}
+
+
+async def marks_by_row(accs: list[Client], monkeypatch) -> dict[tuple[str, str], str]:
+    return {key: row["Mark"] for key, row in (await row_cells(accs, monkeypatch)).items()}
+
+
+async def test_positions_priced_by_the_account_holding_them(monkeypatch):
+    # Lighter RH lists 243 markets against Core's 71, so the lead cannot price every leg.
+    rh = VenueClient("rh1", "lighter", {"BTC": "100000"})
+    core = VenueClient("core1", "lighter_core", {"DOGE": "0.25"})
+    rh.positions_value = [position("BTC", "bid", "0.01", "99000")]
+    core.positions_value = [position("DOGE", "ask", "4000", "0.24")]
+
+    marks = await marks_by_row([rh, core], monkeypatch)
+
+    assert marks == {("rh1", "BTC"): "100,000.00", ("core1", "DOGE"): "0.25"}
+
+
+async def test_marks_are_quoted_once_per_market_per_venue(monkeypatch):
+    # A mark is market data, so accounts on one venue share a quote: 6 accounts holding the same
+    # two markets are 4 quotes, not 12. On Lighter each one is a 250-level order-book read.
+    quotes = {"BTC": "100000", "ETH": "3000"}
+    accs = [VenueClient(f"rh{i}", "lighter", quotes) for i in range(3)]
+    accs += [VenueClient(f"core{i}", "lighter_core", quotes) for i in range(3)]
+    for acc in accs:
+        acc.positions_value = [position("BTC", "bid", "0.01"), position("ETH", "ask", "0.1")]
+
+    rows = await row_cells(cast(list[Client], accs), monkeypatch)
+
+    assert len(rows) == 12  # every position still printed, each with a live mark
+    assert all(row["Mark"] != "n/a" for row in rows.values())
+    asked = sorted((acc.exchange, symbol) for acc in accs for symbol in acc.price_calls)
+    assert asked == [
+        ("lighter", "BTC"),
+        ("lighter", "ETH"),
+        ("lighter_core", "BTC"),
+        ("lighter_core", "ETH"),
+    ]
+
+
+async def test_unpriceable_position_is_flagged_and_logged(monkeypatch):
+    rh = VenueClient("rh1", "lighter", {"BTC": "100000"})
+    core = VenueClient("core1", "lighter_core", {})  # this venue quotes nothing right now
+    rh.positions_value = [position("BTC", "bid", "0.01", "99000")]
+    core.positions_value = [position("BTC", "ask", "0.01", "99500")]
+    warning = Mock()
+    monkeypatch.setattr("strategy.runner.logger.warning", warning)
+
+    rows = await row_cells([rh, core], monkeypatch)
+
+    assert rows[("rh1", "BTC")]["Mark"] == "100,000.00"
+    stale = rows[("core1", "BTC")]
+    assert [stale["Mark"], stale["PnL"], stale["ROI"]] == ["n/a", "n/a", "n/a"]
+    assert stale["Value"] == "995.00"  # valued at its entry: 0.01 x 99,500
+    warning.assert_called_once_with(
+        "lighter_core: no mark price for BTC: No quote for BTC on lighter_core"
+    )
+
+
+async def test_a_hedged_pair_on_one_venue_goes_stale_together(monkeypatch):
+    # One quote per venue market: a pair can never show a live mark on one leg and an entry
+    # price on the other, which would read as net long or short while it is flat.
+    prime = VenueClient("prime", "lighter", {})
+    hedge = VenueClient("hedge", "lighter", {})
+    prime.positions_value = [position("BTC", "bid", "0.01", "99000")]
+    hedge.positions_value = [position("BTC", "ask", "0.01", "99500")]
+    warning = Mock()
+    monkeypatch.setattr("strategy.runner.logger.warning", warning)
+
+    rows = await row_cells([prime, hedge], monkeypatch)
+
+    assert [row["Mark"] for row in rows.values()] == ["n/a", "n/a"]
+    assert prime.price_calls == ["BTC"] and hedge.price_calls == []
+    warning.assert_called_once_with("lighter: no mark price for BTC: No quote for BTC on lighter")
 
 
 class ClosedMarketClient(Client):

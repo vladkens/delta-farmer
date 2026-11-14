@@ -6,8 +6,10 @@ import pytest
 from pydantic import ValidationError
 
 from lib.errors import AppError
-from strategy.models import AppConfig, TradingClient
+from strategy.models import AppConfig, TradeConfig, TradingClient
 from strategy.runner import (
+    _check_cfg,
+    _prepare_groups,
     _run_groups,
     _track_trade_started,
     run_strategy,
@@ -200,6 +202,128 @@ async def test_group_tasks_are_awaited_when_pool_is_cancelled(monkeypatch):
         await task
 
     assert child_stopped.is_set()
+
+
+# MARK: Hedge direction
+
+
+def hedge_pool(accounts: tuple[str, ...] = ("one", "two"), **extra) -> TradeConfig:
+    """One named pool, built through the config models the operator's TOML goes through."""
+    cfg = AppConfig.model_validate(
+        {
+            "accounts": [{"name": name, "privkey": "secret"} for name in accounts],
+            "pools": {
+                "hedge": {"accounts": list(accounts), **trade_settings("BTC"), **extra},
+            },
+        }
+    )
+    return cfg.pools["hedge"]
+
+
+def venue_clients(*venues: str) -> list[Mock]:
+    names = ("one", "two", "three", "four")
+    clients: list[Mock] = []
+    for name, venue in zip(names[: len(venues)], venues, strict=True):
+        client = AsyncMock()
+        client.name = name
+        client.exchange = venue
+        clients.append(client)
+    return clients
+
+
+def check_hedge_cfg(cfg: TradeConfig, *venues: str) -> None:
+    _check_cfg(cfg, cast(list[TradingClient], venue_clients(*venues)))
+
+
+def test_long_exchange_must_match_an_account():
+    cfg = hedge_pool(long_exchange="nado")
+
+    with pytest.raises(AppError, match="matches no account here: lighter, lighter_core"):
+        check_hedge_cfg(cfg, "lighter", "lighter_core")
+
+
+def test_long_exchange_cannot_match_both_legs():
+    cfg = hedge_pool(long_exchange="lighter")
+
+    with pytest.raises(AppError, match="needs one leg there and one elsewhere per pair"):
+        check_hedge_cfg(cfg, "lighter", "lighter")
+
+
+def test_long_exchange_requires_one_symbol_per_trade():
+    cfg = hedge_pool(long_exchange="lighter", symbols=["BTC", "ETH"], symbols_per_trade=2)
+
+    with pytest.raises(AppError, match="long_exchange requires symbols_per_trade=1, got 2"):
+        check_hedge_cfg(cfg, "lighter", "lighter_core")
+
+
+@pytest.mark.parametrize(
+    "venues",
+    [
+        ("lighter", "lighter_core", "lighter"),  # a leg without its pair
+        ("lighter", "lighter_core", "lighter", "lighter"),  # a pair with both legs long
+    ],
+)
+def test_long_exchange_requires_whole_pairs(venues):
+    cfg = hedge_pool(accounts=("one", "two", "three"), long_exchange="lighter")
+
+    with pytest.raises(AppError, match="needs one leg there and one elsewhere per pair"):
+        check_hedge_cfg(cfg, *venues)
+
+
+def test_hedge_pair_config_is_accepted():
+    cfg = hedge_pool(long_exchange="lighter")
+
+    assert cfg.long_exchange == "lighter"
+    check_hedge_cfg(cfg, "lighter", "lighter_core")  # one account per venue, one symbol
+    assert cfg.group_size is None
+
+
+def test_hedge_pairs_run_one_group_each():
+    cfg = hedge_pool(long_exchange="lighter_core", first_as_prime=True)
+
+    check_hedge_cfg(cfg, "lighter", "lighter_core", "lighter_core", "lighter")
+    assert (cfg.group_size, cfg.first_as_prime) == (2, True)
+
+
+def test_long_exchange_pool_takes_one_account():
+    # The account's own wallet holds both legs, so one name is a whole hedge pool.
+    assert hedge_pool(accounts=("one",), long_exchange="lighter").accounts == ["one"]
+
+    with pytest.raises(ValidationError, match="a pool needs at least 2 accounts"):
+        hedge_pool(accounts=("one",))
+
+
+@pytest.mark.parametrize(
+    ("extra", "field"),
+    [({"regroup_interval": "1h"}, "regroup_interval"), ({"group_size": 3}, "group_size")],
+)
+def test_long_exchange_refuses_regrouping(extra, field):
+    with pytest.raises(ValidationError, match=f"own pair: drop {field}"):
+        hedge_pool(long_exchange="lighter", **extra)
+
+
+def test_long_exchange_accepts_the_implied_group_size():
+    assert hedge_pool(long_exchange="lighter", group_size=2).group_size == 2
+
+
+def test_pool_without_long_exchange_keeps_its_shape():
+    cfg = hedge_pool(
+        accounts=("one", "two", "three", "four"), symbols=["BTC", "ETH"], symbols_per_trade=2
+    )
+
+    assert cfg.long_exchange is None
+    check_hedge_cfg(cfg, "lighter", "lighter", "lighter", "lighter")
+
+
+async def test_long_exchange_fails_before_any_account_is_touched():
+    clients = venue_clients("lighter", "lighter_core")
+
+    with pytest.raises(AppError, match="matches no account here"):
+        await _prepare_groups(hedge_pool(long_exchange="nado"), cast(list[TradingClient], clients))
+
+    for client in clients:
+        client.registered.assert_not_awaited()
+        client.get_symbols.assert_not_awaited()
 
 
 def test_pool_name_is_not_sent_to_telemetry(monkeypatch):

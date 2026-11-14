@@ -27,10 +27,16 @@ from lib.evm import (
     to_token_units,
 )
 from lib.http import ApiError, AsyncHttp, HttpMethod
-from lib.lighter_crypto import ROBINHOOD_SIGNING_CHAIN_ID, AuthToken, LighterSigner, SignedTx
+from lib.lighter_crypto import (
+    LIGHTER_CHAIN_ID,
+    ROBINHOOD_SIGNING_CHAIN_ID,
+    AuthToken,
+    LighterSigner,
+    SignedTx,
+)
 from lib.logger import logger
 from lib.models import AccountConfig
-from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side
+from strategy import Order, OrderBook, OrderStatus, Position, ProfileInfo, Side, TradingClient
 from strategy.deposit import (
     DepositAsset,
     DepositBalances,
@@ -50,7 +56,6 @@ PERPS_ROUTE_TYPE = 0
 WITHDRAWAL_CREDIT_TIMEOUT_SEC = 10 * 60
 WITHDRAWAL_POLL_DELAY = 10
 
-API_KEY_INDEX = 3
 POLL_ATTEMPTS = 30
 POLL_DELAY = 2.0
 
@@ -68,7 +73,8 @@ INTEGRATOR_APPROVAL_FIELDS = {
     "max_spot_maker_fee": "max_integrator_spot_maker_fee",
 }
 
-# The Lighter x Robinhood campaign started on 2026-09-01; earlier volume does not count.
+# The Lighter x Robinhood campaign started on 2026-09-01; earlier volume does not count. Core
+# reports from the same cutoff, so both deployments cover one window.
 VOLUME_START_TIMESTAMP = int(datetime(2026, 9, 1, tzinfo=UTC).timestamp())
 
 
@@ -217,13 +223,26 @@ def _has_integrator_approval(account: dict, config: dict) -> bool:
 
 
 @bind_log_context
-class LighterClient:
-    exchange = "lighter"
+class LighterCoreClient:
+    """Core trading client; Robinhood extends it with its points and funding workflows."""
+
+    exchange = "lighter_core"
+    label = "Lighter Core"
+    api_url = "https://mainnet.zklighter.elliot.ai"
+    app_url = "https://app.lighter.xyz"
+    signing_chain_id = LIGHTER_CHAIN_ID
+    # Lighter's own apps hold slots 0-3 on both deployments (and 157 on Robinhood Chain).
+    api_key_index = 4
+    # Core reports a non-zero systemConfig.fee_collector_account_index, so the approval flow
+    # below would sign an ApproveIntegrator whose Core semantics are unverified. Turning this
+    # on needs captured app.lighter.xyz traffic for the same transaction first.
+    integrator_approval = False
+    # This tool cannot deposit to Core, so an account there is funded on its web app.
+    funding_hint = "fund it on Lighter Core by hand"
 
     @classmethod
-    def to_week_label(cls, dt: datetime) -> str:
-        genesis = datetime.fromtimestamp(VOLUME_START_TIMESTAMP, tz=UTC)
-        return utils.to_period_week(dt, genesis=genesis)
+    def __type_check(cls) -> type[TradingClient]:
+        return cls
 
     @classmethod
     def from_config(cls, cfg: AccountConfig) -> Self:
@@ -234,13 +253,13 @@ class LighterClient:
         self.proxy = proxy
         self.account = utils.parse_eth_key(privkey, name)
         self.address = self.account.address
-        self.signer = LighterSigner(privkey, ROBINHOOD_SIGNING_CHAIN_ID)
+        self.signer = LighterSigner(privkey, self.signing_chain_id)
         self._account_index: int | None = None
         self._auth_token: AuthToken | None = None
         self._last_nonce = 0
         self.http = AsyncHttp(
-            baseurl=API_URL,
-            headers={"Origin": APP_URL, "Referer": f"{APP_URL}/"},
+            baseurl=self.api_url,
+            headers={"Origin": self.app_url, "Referer": f"{self.app_url}/"},
             proxy=proxy,
         )
 
@@ -278,18 +297,13 @@ class LighterClient:
     async def _system_config(self) -> dict:
         return await self._call("GET", "/api/v1/systemConfig")
 
-    @retry(max_attempts=5, delay=1.0)
-    async def _get_volume(self, account_index: int) -> Decimal:
-        auth = self._get_auth_headers(account_index)["Authorization"]
-        channel = f"account_all_trades/{account_index}"
-        async with self.http.session.ws_connect(WS_URL) as ws:
-            await ws.send_json({"type": "subscribe", "channel": channel, "auth": auth})
-            while True:
-                data = await ws.recv_json(timeout=30)
-                if data.get("type") == "subscribed/account_all_trades":
-                    return Decimal(str(data["total_volume"]))
+    async def _get_volume(self, account_index: int, pnl_history: list[dict]) -> Decimal:
+        # The account_all_trades feed totals the account's whole life, and a Core account may
+        # carry manual trading from before the campaign; the P/L buckets since its start carry
+        # their own volume.
+        return sum((Decimal(str(bucket["volume"])) for bucket in pnl_history), Decimal(0))
 
-    async def _get_pnl(self, account_index: int) -> Decimal:
+    async def _get_pnl_history(self, account_index: int) -> list[dict]:
         hdr = self._get_auth_headers(account_index)
         pld = {
             "by": "index",
@@ -312,6 +326,10 @@ class LighterClient:
             res = await self._call("GET", "/api/v1/pnl", params=pld, headers=hdr)
             history = res["pnl"]
 
+        return history
+
+    @staticmethod
+    def _get_pnl(history: list[dict]) -> Decimal:
         if not history:
             return Decimal(0)
 
@@ -319,36 +337,35 @@ class LighterClient:
         last = Decimal(str(history[-1]["trade_pnl"]))
         return last - first
 
-    async def _get_used_referral_code(self, account_index: int) -> str | None:
+    async def _fetch_used_referral_code(self, account_index: int) -> str | None:
         hdr = self._get_auth_headers(account_index)
         pld = {"l1_address": self.address, "is_eligible": "false"}
         res = await self._call("GET", "/api/v1/referral/userReferrals", params=pld, headers=hdr)
         return res.get("used_code") or None
 
-    async def _get_points(self, account_index: int) -> Decimal:
+    async def _get_used_referral_code(self, account_index: int) -> str | None:
+        # Core serves /api/v1/referral/userReferrals only to an authenticated Core account, so
+        # its response there is unobserved; a referral code is a display field and must not take
+        # down the whole profile row. Robinhood overrides this and keeps reporting API errors.
         try:
-            auth = self._get_auth_headers(account_index)["Authorization"]
-            res = await self._call(
-                "GET",
-                "/api/v1/leaderboard",
-                params={"type": "all", "l1_address": self.address, "auth": auth},
-                headers={"PreferAuthServer": "true"},
-            )
-            for entry in res["entries"]:
-                if entry["l1_address"].lower() == self.address.lower():
-                    return Decimal(str(entry["points"]))
-        except Exception as error:
-            logger.warning(f"Leaderboard points unavailable: {error}")
-            return Decimal(0)
+            return await self._fetch_used_referral_code(account_index)
+        except ApiError as error:
+            logger.warning(f"Referral code unavailable: {error}")
+            return None
 
-        logger.warning("No leaderboard points for account")
-        return Decimal(0)
+    async def _get_points(self, account_index: int) -> Decimal | None:
+        # Core points reporting is not implemented; never query the Robinhood campaign.
+        return None
+
+    async def points_total(self) -> Decimal | None:
+        return None
 
     async def profile(self) -> ProfileInfo:
         info = await self.account_info()
         account_index = info["account_index"]
-        volume = await self._get_volume(account_index)
-        pnl = await self._get_pnl(account_index)
+        pnl_history = await self._get_pnl_history(account_index)
+        volume = await self._get_volume(account_index, pnl_history)
+        pnl = self._get_pnl(pnl_history)
         ref_code = await self._get_used_referral_code(account_index)
         points = await self._get_points(account_index)
 
@@ -357,25 +374,15 @@ class LighterClient:
             balance=Decimal(info["collateral"]),
             volume=volume,
             pnl=pnl,
-            points=points,
+            points=points if points is not None else Decimal(0),
             ref_code=ref_code,
         )
 
     async def use_referral_code(self, referral_code: str) -> None:
-        # The web client calls this a signature, but it is a Base64 protocol marker.
-        signature = f"{self.address}{referral_code}wP81zDNpES"
-        signature = base64.b64encode(signature.encode()).decode()
-        hdr = {"PreferAuthServer": "true"}
-        pld = {
-            "l1_address": self.address,
-            "referral_code": referral_code,
-            "discord": "",
-            "telegram": "",
-            "x": "",
-            "signature": signature,
-            "source": "none",
-        }
-        await self._call("POST", "/api/v1/referral/use", data=pld, headers=hdr)
+        # /api/v1/referral/use is only known from the Robinhood web client: its Base64 marker,
+        # its "source" value and its header set. Nothing shows Core accepts the same call, and
+        # this one changes live account state, so Robinhood implements it and Core does not.
+        raise AppError(f"Referral code is not verified on {self.label}")
 
     async def _get_account_index(self) -> int:
         if self._account_index is None:
@@ -386,7 +393,7 @@ class LighterClient:
     async def _get_api_key(
         self, account_index: int, *, headers: dict[str, str] | None = None
     ) -> bytes | None:
-        pld = {"account_index": account_index, "api_key_index": API_KEY_INDEX}
+        pld = {"account_index": account_index, "api_key_index": self.api_key_index}
         try:
             res = await self._call("GET", "/api/v1/apikeys", params=pld, headers=headers)
         except LighterApiError as error:
@@ -394,25 +401,25 @@ class LighterClient:
                 return None
             raise
 
-        item = utils.first([x for x in res["api_keys"] if x["api_key_index"] == API_KEY_INDEX])
+        item = utils.first([x for x in res["api_keys"] if x["api_key_index"] == self.api_key_index])
         if item is None:
             return None
 
         return bytes.fromhex(item["public_key"].removeprefix("0x"))
 
     async def _get_next_nonce(self, account_index: int) -> int:
-        pld = {"account_index": account_index, "api_key_index": API_KEY_INDEX}
+        pld = {"account_index": account_index, "api_key_index": self.api_key_index}
         data = await self._call("GET", "/api/v1/nextNonce", params=pld)
         return data["nonce"]
 
     async def _send_change_pub_key(self, account_index: int) -> None:
         nonce = await self._get_next_nonce(account_index)
         expired_at = int(time.time() * 1_000) + TX_LIFETIME_MS
-        message = self.signer.change_pub_key_message(account_index, API_KEY_INDEX, nonce)
+        message = self.signer.change_pub_key_message(account_index, self.api_key_index, nonce)
         signature = self.account.sign_message(encode_defunct(text=message)).signature.hex()
         tx = self.signer.sign_change_pub_key(
             account_index,
-            API_KEY_INDEX,
+            self.api_key_index,
             nonce,
             expired_at,
             signature,
@@ -432,7 +439,7 @@ class LighterClient:
         }
         message = self.signer.approve_integrator_message(
             account_index,
-            API_KEY_INDEX,
+            self.api_key_index,
             nonce,
             approval_expiry=approval_expiry,
             **values,
@@ -440,7 +447,7 @@ class LighterClient:
         signature = self.account.sign_message(encode_defunct(text=message)).signature.hex()
         tx = self.signer.sign_approve_integrator(
             account_index,
-            API_KEY_INDEX,
+            self.api_key_index,
             approval_expiry=approval_expiry,
             nonce=nonce,
             expired_at=now + TX_LIFETIME_MS,
@@ -476,6 +483,9 @@ class LighterClient:
         raise ApiError("Lighter API-key update timed out")
 
     async def _ensure_integrator_approval(self, account: dict) -> str:
+        if not self.integrator_approval:
+            return "integrator skipped"
+
         config = await self._system_config()
         if int(config["fee_collector_account_index"]) == 0:
             return "integrator disabled"
@@ -496,7 +506,7 @@ class LighterClient:
         now = int(time.time())
         if force or self._auth_token is None or self._auth_token.deadline - now < AUTH_REFRESH_SEC:
             self._auth_token = self.signer.create_auth_token(
-                account_index, API_KEY_INDEX, now + AUTH_LIFETIME_SEC
+                account_index, self.api_key_index, now + AUTH_LIFETIME_SEC
             )
 
         return {"PreferAuthServer": "true", "Authorization": self._auth_token.token}
@@ -507,7 +517,7 @@ class LighterClient:
             account = await self.account_info()
         except LighterApiError as error:
             if error.is_account_missing():
-                raise AppError("Account is not registered; deposit first") from None
+                raise AppError(f"Account is not registered; {self.funding_hint}") from None
             raise
 
         account_index = account["account_index"]
@@ -524,7 +534,7 @@ class LighterClient:
             raise ApiError("Lighter authentication returned a different API key")
 
         integrator = await self._ensure_integrator_approval(account)
-        return f"slot {API_KEY_INDEX}, {status}, {integrator}"
+        return f"slot {self.api_key_index}, {status}, {integrator}"
 
     async def auth_ready(self) -> bool:
         try:
@@ -693,233 +703,6 @@ class LighterClient:
     async def balance(self) -> Decimal:
         return Decimal((await self.account_info())["collateral"])
 
-    async def deposit_balance(self) -> Decimal:
-        return await self.balance() if await self.registered() else Decimal(0)
-
-    @ttl_cache(3600)
-    async def deposit_network(self) -> DepositNetwork:
-        layer1 = await self._call("GET", "/api/v1/layer1BasicInfo")
-        assets = await self._call("GET", "/api/v1/assetDetails")
-        return _deposit_network(layer1, assets)
-
-    async def deposit_asset(self) -> DepositAsset:
-        info = await self.deposit_network()
-        return DepositAsset(self.exchange.title(), info.network, info.token, info.min_amount)
-
-    async def deposit_balances(self) -> DepositBalances:
-        info = await self.deposit_network()
-        balance, wallet_balances = await asyncio.gather(
-            self.deposit_balance(),
-            get_evm_balances(
-                info.network,
-                self.address,
-                (info.token, info.network.native_token),
-                self.proxy,
-            ),
-        )
-        return DepositBalances(
-            balance,
-            wallet_balances[info.token],
-            wallet_balances[info.network.native_token],
-        )
-
-    async def deposit(self, amount: Decimal) -> str:
-        info = await self.deposit_network()
-        amount = deposit_amount(amount, info.token.decimals, info.min_amount)
-        logger.info(f"Deposit {amount:,.2f} {info.token.symbol}")
-        amount_units = to_token_units(amount, info.token)
-        balance = await self.deposit_balance()
-        call = make_call(
-            info.contract,
-            "deposit",
-            ["address", "uint16", "uint8", "uint256"],
-            [self.address, info.asset_index, PERPS_ROUTE_TYPE, amount_units],
-        )
-        tx_hash, fee = await execute_contract_with_erc20_allowance(
-            info.network,
-            self.account,
-            info.token,
-            info.contract,
-            amount_units,
-            call,
-            self.proxy,
-            DEPOSIT_RECEIPT_TIMEOUT_SEC,
-        )
-        logger.info(f"Deposit tx: {tx_hash}; fee: {fee:,.8f} ETH")
-        logger.info("Deposit tx confirmed; waiting for credit")
-        await wait_for_deposit_credit(self, balance + amount, tx_hash)
-        logger.success(f"Deposit credited: {info.network.tx_url(tx_hash)}")
-
-        return tx_hash
-
-    async def _fast_withdrawal_info(self, account_index: int) -> FastWithdrawalInfo:
-        hdr = self._get_auth_headers(account_index)
-        res = await self._call(
-            "GET",
-            "/api/v1/fastwithdraw/info",
-            params={"account_index": account_index},
-            headers=hdr,
-        )
-        return FastWithdrawalInfo.model_validate(res)
-
-    async def _transfer_fee(self, account_index: int, to_account_index: int) -> int:
-        hdr = self._get_auth_headers(account_index)
-        pld = {"account_index": account_index, "to_account_index": to_account_index}
-        res = await self._call("GET", "/api/v1/transferFeeInfo", params=pld, headers=hdr)
-        return TransferFeeInfo.model_validate(res).transfer_fee_usdc
-
-    async def _withdrawal_blocker(self) -> str | None:
-        orders, positions = await asyncio.gather(self.orders(), self.positions())
-        if orders and positions:
-            return "open positions and orders"
-        if positions:
-            return "open positions"
-        if orders:
-            return "open orders"
-        return None
-
-    async def withdrawal_info(self) -> WithdrawalInfo:
-        account = WithdrawalAccountInfo.model_validate(await self.account_info())
-        account_index = account.account_index
-        fast, blocker = await asyncio.gather(
-            self._fast_withdrawal_info(account_index),
-            self._withdrawal_blocker(),
-        )
-        fee_units = await self._transfer_fee(account_index, fast.to_account_index)
-        asset = await self.deposit_network()
-        fee = Decimal(fee_units).scaleb(-asset.token.decimals)
-        available = min(
-            account.available_balance,
-            fast.withdraw_limit,
-            fast.max_withdrawal_amount,
-        )
-        return WithdrawalInfo(
-            self.exchange.title(),
-            asset.network,
-            asset.token,
-            account.collateral,
-            available,
-            unavailable=blocker,
-            fee=fee,
-        )
-
-    async def _wallet_balance(self, asset: DepositNetwork) -> Decimal:
-        balances = await get_evm_balances(
-            asset.network,
-            self.address,
-            (asset.token,),
-            self.proxy,
-        )
-        return balances[asset.token]
-
-    async def _submit_fast_withdrawal(
-        self,
-        account_index: int,
-        tx: SignedTx,
-    ) -> str:
-        hdr = self._get_auth_headers(account_index)
-        multipart = CurlMime.from_list(
-            [
-                {
-                    "name": "tx_info",
-                    "data": json.dumps(tx.info, separators=(",", ":")).encode(),
-                },
-                {"name": "to_address", "data": self.address.encode()},
-            ]
-        )
-        try:
-            res = await self._call(
-                "POST",
-                "/api/v1/fastwithdraw",
-                multipart=multipart,
-                headers=hdr,
-            )
-        finally:
-            multipart.close()
-
-        result = FastWithdrawalResult.model_validate(res)
-        tx_hash = result.tx_hash.removeprefix("0x").lower()
-        if tx_hash != tx.tx_hash:
-            raise ApiError(f"Lighter returned a different withdrawal hash: {tx_hash}")
-
-        return tx_hash
-
-    async def withdraw(self, amount: Decimal) -> str:
-        asset = await self.deposit_network()
-        amount = withdrawal_amount(amount, asset.token.decimals)
-        logger.info(f"Withdraw {amount:,.2f} {asset.token.symbol}")
-
-        details = await self.withdrawal_info()
-        if details.unavailable:
-            raise ApiError(f"Withdrawal blocked: {details.unavailable}")
-
-        account_index = await self._get_account_index()
-        fast = await self._fast_withdrawal_info(account_index)
-        fee_units = await self._transfer_fee(account_index, fast.to_account_index)
-        fee = Decimal(fee_units).scaleb(-asset.token.decimals)
-        available = min(
-            details.available,
-            fast.withdraw_limit,
-            fast.max_withdrawal_amount,
-        )
-        safe_amount = withdrawal_limit(details.balance, available, fee)
-        if amount > safe_amount:
-            raise ApiError(
-                f"Withdrawal exceeds safe {asset.token.symbol} amount: {safe_amount} < {amount}"
-            )
-
-        wallet_balance = await self._wallet_balance(asset)
-        amount_units = to_token_units(amount, asset.token)
-        nonce = self._next_nonce()
-        memo = bytes.fromhex(self.address[2:]) + bytes(12)
-        message = self.signer.transfer_message(
-            account_index,
-            API_KEY_INDEX,
-            fast.to_account_index,
-            asset.asset_index,
-            PERPS_ROUTE_TYPE,
-            PERPS_ROUTE_TYPE,
-            amount_units,
-            fee_units,
-            memo,
-            nonce,
-        )
-        signature = self.account.sign_message(encode_defunct(text=message)).signature.hex()
-        tx = self.signer.sign_transfer(
-            account_index,
-            API_KEY_INDEX,
-            fast.to_account_index,
-            asset.asset_index,
-            PERPS_ROUTE_TYPE,
-            PERPS_ROUTE_TYPE,
-            amount_units,
-            fee_units,
-            memo,
-            nonce,
-            nonce + TX_LIFETIME_MS,
-            signature,
-        )
-        tx_hash = await self._submit_fast_withdrawal(account_index, tx)
-        logger.info(f"Withdrawal submitted: {tx_hash}; waiting for wallet credit")
-
-        expected_balance = wallet_balance + amount
-        deadline = time.monotonic() + WITHDRAWAL_CREDIT_TIMEOUT_SEC
-        while time.monotonic() < deadline:
-            wallet_balance = await self._wallet_balance(asset)
-            if wallet_balance >= expected_balance:
-                logger.success(
-                    f"Withdrawal credited: {asset.token.symbol} wallet balance "
-                    f"{wallet_balance:,.2f}"
-                )
-                return tx_hash
-
-            await asyncio.sleep(WITHDRAWAL_POLL_DELAY)
-
-        raise ApiError(f"Lighter withdrawal credit timed out: {tx_hash}")
-
-    async def get_min_deposit_usd(self) -> Decimal:
-        return (await self.deposit_network()).min_amount
-
     async def positions(self) -> list[Position]:
         info = await self.account_info()
         markets = {x["market_id"]: x for x in await self._markets()}
@@ -1035,7 +818,7 @@ class LighterClient:
         order_expiry = 0 if order_type == 1 else nonce + ORDER_LIFETIME_MS
         tx = self.signer.sign_create_order(
             await self._get_account_index(),
-            API_KEY_INDEX,
+            self.api_key_index,
             market["market_id"],
             nonce,
             base_amount,
@@ -1074,7 +857,7 @@ class LighterClient:
         nonce = self._next_nonce()
         tx = self.signer.sign_cancel_order(
             await self._get_account_index(),
-            API_KEY_INDEX,
+            self.api_key_index,
             market["market_id"],
             int(order.id),
             nonce,
@@ -1101,7 +884,7 @@ class LighterClient:
 
         nonce = self._next_nonce()
         tx = self.signer.sign_cancel_all_orders(
-            account_index, API_KEY_INDEX, nonce, nonce + TX_LIFETIME_MS
+            account_index, self.api_key_index, nonce, nonce + TX_LIFETIME_MS
         )
         await self._send_tx(tx)
 
@@ -1128,7 +911,7 @@ class LighterClient:
         nonce = self._next_nonce()
         tx = self.signer.sign_update_leverage(
             await self._get_account_index(),
-            API_KEY_INDEX,
+            self.api_key_index,
             market["market_id"],
             10_000 // leverage,
             nonce,
@@ -1142,3 +925,308 @@ class LighterClient:
             if attempt < POLL_ATTEMPTS - 1:
                 await asyncio.sleep(POLL_DELAY)
         raise ApiError(f"Lighter leverage update timed out for {symbol}")
+
+
+@bind_log_context
+class LighterRobinhoodClient(LighterCoreClient):
+    """Lighter on Robinhood Chain, including its points and funding workflows."""
+
+    exchange = "lighter"
+    label = "Lighter"
+    api_url = API_URL
+    app_url = APP_URL
+    ws_url = WS_URL
+    signing_chain_id = ROBINHOOD_SIGNING_CHAIN_ID
+    # Slot 3 is reserved, but existing accounts already hold their key there; moving it would
+    # need a login per account and would drop any live web session.
+    api_key_index = 3
+    integrator_approval = True
+    funding_hint = "deposit first"
+
+    @classmethod
+    def to_week_label(cls, dt: datetime) -> str:
+        genesis = datetime.fromtimestamp(VOLUME_START_TIMESTAMP, tz=UTC)
+        return utils.to_period_week(dt, genesis=genesis)
+
+    @retry(max_attempts=5, delay=1.0)
+    async def _get_volume(self, account_index: int, pnl_history: list[dict]) -> Decimal:
+        auth = self._get_auth_headers(account_index)["Authorization"]
+        channel = f"account_all_trades/{account_index}"
+        async with self.http.session.ws_connect(self.ws_url) as ws:
+            await ws.send_json({"type": "subscribe", "channel": channel, "auth": auth})
+            while True:
+                data = await ws.recv_json(timeout=30)
+                if data.get("type") == "subscribed/account_all_trades":
+                    return Decimal(str(data["total_volume"]))
+
+    async def _get_points(self, account_index: int) -> Decimal | None:
+        try:
+            auth = self._get_auth_headers(account_index)["Authorization"]
+            res = await self._call(
+                "GET",
+                "/api/v1/leaderboard",
+                params={"type": "all", "l1_address": self.address, "auth": auth},
+                headers={"PreferAuthServer": "true"},
+            )
+            for entry in res["entries"]:
+                if entry["l1_address"].lower() == self.address.lower():
+                    return Decimal(str(entry["points"]))
+        except Exception as error:
+            logger.warning(f"Leaderboard points unavailable: {error}")
+            return None
+
+        logger.warning("No leaderboard points for account")
+        return None
+
+    async def points_total(self) -> Decimal | None:
+        info = await self.account_info()
+        return await self._get_points(info["account_index"])
+
+    async def _get_used_referral_code(self, account_index: int) -> str | None:
+        return await self._fetch_used_referral_code(account_index)
+
+    async def use_referral_code(self, referral_code: str) -> None:
+        # The web client calls this a signature, but it is a Base64 protocol marker.
+        signature = f"{self.address}{referral_code}wP81zDNpES"
+        signature = base64.b64encode(signature.encode()).decode()
+        pld = {
+            "l1_address": self.address,
+            "referral_code": referral_code,
+            "discord": "",
+            "telegram": "",
+            "x": "",
+            "signature": signature,
+            "source": "none",
+        }
+        await self._call(
+            "POST", "/api/v1/referral/use", data=pld, headers={"PreferAuthServer": "true"}
+        )
+
+    # MARK: Robinhood deposits and withdrawals
+
+    async def deposit_balance(self) -> Decimal:
+        return await self.balance() if await self.registered() else Decimal(0)
+
+    @ttl_cache(3600)
+    async def deposit_network(self) -> DepositNetwork:
+        layer1 = await self._call("GET", "/api/v1/layer1BasicInfo")
+        assets = await self._call("GET", "/api/v1/assetDetails")
+        return _deposit_network(layer1, assets)
+
+    async def deposit_asset(self) -> DepositAsset:
+        info = await self.deposit_network()
+        return DepositAsset(self.label, info.network, info.token, info.min_amount)
+
+    async def deposit_balances(self) -> DepositBalances:
+        info = await self.deposit_network()
+        balance, wallet_balances = await asyncio.gather(
+            self.deposit_balance(),
+            get_evm_balances(
+                info.network,
+                self.address,
+                (info.token, info.network.native_token),
+                self.proxy,
+            ),
+        )
+        return DepositBalances(
+            balance,
+            wallet_balances[info.token],
+            wallet_balances[info.network.native_token],
+        )
+
+    async def deposit(self, amount: Decimal) -> str:
+        info = await self.deposit_network()
+        amount = deposit_amount(amount, info.token.decimals, info.min_amount)
+        logger.info(f"Deposit {amount:,.2f} {info.token.symbol}")
+        amount_units = to_token_units(amount, info.token)
+        balance = await self.deposit_balance()
+        call = make_call(
+            info.contract,
+            "deposit",
+            ["address", "uint16", "uint8", "uint256"],
+            [self.address, info.asset_index, PERPS_ROUTE_TYPE, amount_units],
+        )
+        tx_hash, fee = await execute_contract_with_erc20_allowance(
+            info.network,
+            self.account,
+            info.token,
+            info.contract,
+            amount_units,
+            call,
+            self.proxy,
+            DEPOSIT_RECEIPT_TIMEOUT_SEC,
+        )
+        logger.info(f"Deposit tx: {tx_hash}; fee: {fee:,.8f} ETH")
+        logger.info("Deposit tx confirmed; waiting for credit")
+        await wait_for_deposit_credit(self, balance + amount, tx_hash)
+        logger.success(f"Deposit credited: {info.network.tx_url(tx_hash)}")
+
+        return tx_hash
+
+    async def _fast_withdrawal_info(self, account_index: int) -> FastWithdrawalInfo:
+        hdr = self._get_auth_headers(account_index)
+        res = await self._call(
+            "GET",
+            "/api/v1/fastwithdraw/info",
+            params={"account_index": account_index},
+            headers=hdr,
+        )
+        return FastWithdrawalInfo.model_validate(res)
+
+    async def _transfer_fee(self, account_index: int, to_account_index: int) -> int:
+        hdr = self._get_auth_headers(account_index)
+        pld = {"account_index": account_index, "to_account_index": to_account_index}
+        res = await self._call("GET", "/api/v1/transferFeeInfo", params=pld, headers=hdr)
+        return TransferFeeInfo.model_validate(res).transfer_fee_usdc
+
+    async def _withdrawal_blocker(self) -> str | None:
+        orders, positions = await asyncio.gather(self.orders(), self.positions())
+        if orders and positions:
+            return "open positions and orders"
+        if positions:
+            return "open positions"
+        if orders:
+            return "open orders"
+        return None
+
+    async def withdrawal_info(self) -> WithdrawalInfo:
+        account = WithdrawalAccountInfo.model_validate(await self.account_info())
+        account_index = account.account_index
+        fast, blocker = await asyncio.gather(
+            self._fast_withdrawal_info(account_index),
+            self._withdrawal_blocker(),
+        )
+        fee_units = await self._transfer_fee(account_index, fast.to_account_index)
+        asset = await self.deposit_network()
+        fee = Decimal(fee_units).scaleb(-asset.token.decimals)
+        available = min(
+            account.available_balance,
+            fast.withdraw_limit,
+            fast.max_withdrawal_amount,
+        )
+        return WithdrawalInfo(
+            self.label,
+            asset.network,
+            asset.token,
+            account.collateral,
+            available,
+            unavailable=blocker,
+            fee=fee,
+        )
+
+    async def _wallet_balance(self, asset: DepositNetwork) -> Decimal:
+        balances = await get_evm_balances(
+            asset.network,
+            self.address,
+            (asset.token,),
+            self.proxy,
+        )
+        return balances[asset.token]
+
+    async def _submit_fast_withdrawal(
+        self,
+        account_index: int,
+        tx: SignedTx,
+    ) -> str:
+        hdr = self._get_auth_headers(account_index)
+        multipart = CurlMime.from_list(
+            [
+                {
+                    "name": "tx_info",
+                    "data": json.dumps(tx.info, separators=(",", ":")).encode(),
+                },
+                {"name": "to_address", "data": self.address.encode()},
+            ]
+        )
+        try:
+            res = await self._call(
+                "POST",
+                "/api/v1/fastwithdraw",
+                multipart=multipart,
+                headers=hdr,
+            )
+        finally:
+            multipart.close()
+
+        result = FastWithdrawalResult.model_validate(res)
+        tx_hash = result.tx_hash.removeprefix("0x").lower()
+        if tx_hash != tx.tx_hash:
+            raise ApiError(f"Lighter returned a different withdrawal hash: {tx_hash}")
+
+        return tx_hash
+
+    async def withdraw(self, amount: Decimal) -> str:
+        asset = await self.deposit_network()
+        amount = withdrawal_amount(amount, asset.token.decimals)
+        logger.info(f"Withdraw {amount:,.2f} {asset.token.symbol}")
+
+        details = await self.withdrawal_info()
+        if details.unavailable:
+            raise ApiError(f"Withdrawal blocked: {details.unavailable}")
+
+        account_index = await self._get_account_index()
+        fast = await self._fast_withdrawal_info(account_index)
+        fee_units = await self._transfer_fee(account_index, fast.to_account_index)
+        fee = Decimal(fee_units).scaleb(-asset.token.decimals)
+        available = min(
+            details.available,
+            fast.withdraw_limit,
+            fast.max_withdrawal_amount,
+        )
+        safe_amount = withdrawal_limit(details.balance, available, fee)
+        if amount > safe_amount:
+            raise ApiError(
+                f"Withdrawal exceeds safe {asset.token.symbol} amount: {safe_amount} < {amount}"
+            )
+
+        wallet_balance = await self._wallet_balance(asset)
+        amount_units = to_token_units(amount, asset.token)
+        nonce = self._next_nonce()
+        memo = bytes.fromhex(self.address[2:]) + bytes(12)
+        message = self.signer.transfer_message(
+            account_index,
+            self.api_key_index,
+            fast.to_account_index,
+            asset.asset_index,
+            PERPS_ROUTE_TYPE,
+            PERPS_ROUTE_TYPE,
+            amount_units,
+            fee_units,
+            memo,
+            nonce,
+        )
+        signature = self.account.sign_message(encode_defunct(text=message)).signature.hex()
+        tx = self.signer.sign_transfer(
+            account_index,
+            self.api_key_index,
+            fast.to_account_index,
+            asset.asset_index,
+            PERPS_ROUTE_TYPE,
+            PERPS_ROUTE_TYPE,
+            amount_units,
+            fee_units,
+            memo,
+            nonce,
+            nonce + TX_LIFETIME_MS,
+            signature,
+        )
+        tx_hash = await self._submit_fast_withdrawal(account_index, tx)
+        logger.info(f"Withdrawal submitted: {tx_hash}; waiting for wallet credit")
+
+        expected_balance = wallet_balance + amount
+        deadline = time.monotonic() + WITHDRAWAL_CREDIT_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            wallet_balance = await self._wallet_balance(asset)
+            if wallet_balance >= expected_balance:
+                logger.success(
+                    f"Withdrawal credited: {asset.token.symbol} wallet balance "
+                    f"{wallet_balance:,.2f}"
+                )
+                return tx_hash
+
+            await asyncio.sleep(WITHDRAWAL_POLL_DELAY)
+
+        raise ApiError(f"Lighter withdrawal credit timed out: {tx_hash}")
+
+    async def get_min_deposit_usd(self) -> Decimal:
+        return (await self.deposit_network()).min_amount

@@ -220,6 +220,7 @@ class TradeConfig(BaseModel):
     max_entry_spread_pct: Decimal | None = Field(Decimal("0.25"), gt=0)
     entry_gate_wait: DurationSec = DurationSec("5m")
     entry_gate_poll: DurationSec = Field(DurationSec("3s"), ge=1, le=10)
+    long_exchange: str | None = None  # exchange id whose accounts take the long side
     first_as_prime: bool = False
     group_size: int | None = Field(None, ge=2, le=5)
     regroup_interval: DurationSec | None = None
@@ -238,6 +239,18 @@ class TradeConfig(BaseModel):
                 values["first_as_prime"] = values.pop("first_as_main")
         return values
 
+    @model_validator(mode="after")
+    def _hedge_pairs_stay_together(self):
+        # A long_exchange account trades against its own twin, one group per pair; regrouping or
+        # another group size would mix legs of different wallets.
+        if self.long_exchange is not None and self.regroup_interval is not None:
+            raise ValueError(
+                "long_exchange runs each account as its own pair: drop regroup_interval"
+            )
+        if self.long_exchange is not None and self.group_size not in (None, 2):
+            raise ValueError("long_exchange runs each account as its own pair: drop group_size")
+        return self
+
     @property
     def limit_wait_budget(self) -> int:
         """Worst-case wait for one limit order before fallback."""
@@ -247,10 +260,14 @@ class TradeConfig(BaseModel):
 class StrategyPoolConfig(TradeConfig):
     """One named strategy's account membership and trading parameters."""
 
-    accounts: list[str] = Field(..., min_length=2)
+    accounts: list[str] = Field(..., min_length=1)
 
     @model_validator(mode="after")
     def _unique_accounts(self):
+        # A long_exchange account brings both legs itself; any other pool needs two accounts.
+        if self.long_exchange is None and len(self.accounts) < 2:
+            raise ValueError("a pool needs at least 2 accounts")
+
         duplicates = {name for name in self.accounts if self.accounts.count(name) > 1}
         if duplicates:
             raise ValueError(f"duplicate pool accounts: {', '.join(sorted(duplicates))}")
