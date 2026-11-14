@@ -121,7 +121,7 @@ async def main():
         case "close":
             await close_all(act_accs)
         case "trade":
-            await run_strategy(cfg, act_accs, cli.pool)
+            await run_strategy(cfg, act_accs, cli.pool, cycles=cli.cycles)
         case "deposit" | "withdraw":
             noop_command("Rise", cli.command)
 

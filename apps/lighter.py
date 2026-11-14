@@ -515,7 +515,7 @@ async def main():
                 if strategy.long_exchange is not None:
                     accounts = hedge_pairs(accounts, cores)
                 await require_login(accounts)
-                await run_groups(strategy, accounts)
+                await run_groups(strategy, accounts, cycles=cli.cycles)
             case "positions":
                 others = await logged_in_cores(other_cores)
                 await print_positions([*act_accs, *hedge_cores, *others])

@@ -118,7 +118,7 @@ async def main():
         case "close":
             await close_all(act_accs)
         case "trade":
-            await run_strategy(cfg, act_accs, cli.pool)
+            await run_strategy(cfg, act_accs, cli.pool, cycles=cli.cycles)
         case "positions":
             await print_positions(act_accs)
         case "deposit" | "withdraw":

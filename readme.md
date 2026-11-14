@@ -149,7 +149,7 @@ uv run apps/omni.py close
 
 | Command                                      | Available on                         | Purpose                                                                          |
 | -------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------- |
-| `trade [POOL]`                               | All active launchers                 | Start automated trading, optionally using a named pool.                          |
+| `trade [POOL] [--cycles N]`                  | All active launchers                 | Start automated trading, optionally using a named pool. `--cycles N` stops the run after N cycles that traded: exactly N with one group, plus at most one in-flight cycle per extra group. |
 | `close`                                      | All active launchers                 | Cancel open orders and close all positions on enabled accounts.                  |
 | `positions`                                  | All active launchers                 | Show current positions and risk metrics.                                         |
 | `info`                                       | All active launchers                 | Show balances and exchange-specific account metrics.                             |

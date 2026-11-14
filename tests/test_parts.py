@@ -12,7 +12,7 @@ import pytest
 
 from clients.omni import OmniClient, OmniSupportedAsset, OmniTradingSession
 from lib.http import ApiError
-from strategy.cycle import DeltaStrategy
+from strategy.cycle import CycleBudget, DeltaStrategy
 from strategy.models import (
     Order,
     OrderBook,
@@ -22,6 +22,7 @@ from strategy.models import (
     StrategyConfig,
     TradingClient,
 )
+from strategy.runner import _run_groups
 from strategy.trade import DeltaLeg, DeltaTrade, split_qty
 
 PRICE = Decimal(100)
@@ -459,6 +460,379 @@ async def test_hold_through_market_closure_then_close_in_parts(monkeypatch):
     assert reduced_at and min(reduced_at) >= 1030  # nothing was closed while the market was shut
     assert warning.call_count == 0  # no safety-check noise while prices are unavailable
     assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+# MARK: Cycle budget
+
+
+def count_cycles(monkeypatch) -> list[bool | str]:
+    """Outcome of every cycle the loop ran: traded, skipped, or the error that failed it."""
+    outcomes: list[bool | str] = []
+    real_cycle = DeltaStrategy.trade_cycle
+
+    async def counted(self) -> bool:
+        try:
+            traded = await real_cycle(self)
+        except Exception as e:
+            outcomes.append(str(e))
+            raise
+
+        outcomes.append(traded)
+        return traded
+
+    monkeypatch.setattr(DeltaStrategy, "trade_cycle", counted)
+    return outcomes
+
+
+def budget_lines(info: Mock) -> list[str]:
+    """Every line the loop logged about the cycle budget, in order."""
+    return [call.args[0] for call in info.call_args_list if "cycle budget" in call.args[0].lower()]
+
+
+def budget_runner(accounts: list[SimClient], monkeypatch, cycles: int, **cfg):
+    """A whole run against the simulator, stopped by the cycle budget instead of by a signal."""
+    strategy = strategy_for(accounts, None, monkeypatch, **cfg)
+    strategy.budget = CycleBudget(cycles)
+    return strategy
+
+
+async def test_the_cycle_budget_ends_the_run_after_its_trades(monkeypatch):
+    # The flag exists to leave a live test unattended: the run has to end by itself after N
+    # cycles that traded, through the same cleanup a Ctrl-C goes through.
+    accounts, _, net = basket("1.00")
+    outcomes = count_cycles(monkeypatch)
+    info, waits = Mock(), []
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    strategy = budget_runner(accounts, monkeypatch, 2)
+    wait = strategy._wait
+
+    async def recorded(sec: float, *stops) -> None:
+        waits.append(sec)
+        await wait(sec, *stops)
+
+    strategy._wait = recorded
+
+    await strategy.run()
+
+    lines = [call.args[0] for call in info.call_args_list]
+    assert outcomes == [True, True]  # no third cycle was ever started
+    assert waits == [1.0]  # cooldown between the two cycles, none after the last
+    assert budget_lines(info) == [
+        "Cycle budget: 1/2 traded",
+        "Cycle budget: 2/2 traded",
+        "No cycle budget left (2/2 traded), stopping",
+    ]
+    assert lines[-1] == "Shutdown cleanup complete"  # the normal shutdown path, not a crash
+    assert all(not acc.pos.get("BTC") for acc in accounts) and not net["BTC"]
+
+
+async def test_the_budget_exit_closes_what_a_cycle_left_behind(monkeypatch):
+    # The exit is the shutdown cleanup, not just the last cycle's own close: a leg a cycle lost
+    # track of, or an order resting on a venue, must not outlive the run.
+    accounts, _, net = basket("1.00")
+    strategy = budget_runner(accounts, monkeypatch, 1)
+    stop = AsyncMock()
+
+    async def leftover(*args, **kwargs) -> None:
+        accounts[0].pos["ETH"] = Decimal("0.5")  # a position the cycle did not close
+        await stop(*args, **kwargs)
+
+    monkeypatch.setattr("strategy.cycle.tg.on_trade_stop", leftover)
+
+    await strategy.run()
+
+    assert stop.await_count == 1
+    assert accounts[0].orders[-1] == ("ETH", "ask", Decimal("0.5"), True)
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+async def test_a_skipped_cycle_does_not_spend_the_budget(monkeypatch):
+    # "Let it do N real trades" is the whole point: a cycle that found nothing to trade (a closed
+    # market here) must leave the budget where it was, or the run ends having traded less than N.
+    accounts, _, net = basket("1.00")
+    for acc in accounts:
+        acc.market_open = False
+
+    async def reopens(symbol: str, at: datetime, reduce_only=False) -> bool:
+        open_now = accounts[0].market_open
+        for acc in accounts:
+            acc.market_open = True  # shut for the first cycle's filter, open from then on
+        return open_now
+
+    for acc in accounts:
+        acc.is_symbol_tradeable = reopens
+
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    monkeypatch.setattr("strategy.cycle.logger.warning", Mock())
+    strategy = budget_runner(accounts, monkeypatch, 1)
+
+    await strategy.run()
+
+    assert outcomes == [False, True]  # the skipped cycle did not count, so one trade still ran
+    assert budget_lines(info) == [
+        "Cycle budget: 0/1 traded, this one did not count",
+        "Cycle budget: 1/1 traded",
+        "No cycle budget left (1/1 traded), stopping",
+    ]
+    assert len([qty for *_, qty, reduce in accounts[0].orders if not reduce]) == 4
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_a_failed_cycle_does_not_spend_the_budget(monkeypatch):
+    # A cycle that failed is cleaned up and retried, so it traded nothing either. Counting it
+    # would end a `--cycles 1` run on an exchange error, with no trade to show for it.
+    accounts, _, net = basket("1.00")
+    accounts[1].fail = lambda n: n == 1
+    outcomes = count_cycles(monkeypatch)
+    info, crash = Mock(), AsyncMock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    monkeypatch.setattr("strategy.cycle.logger.warning", Mock())
+    monkeypatch.setattr("strategy.cycle.tg.on_error", AsyncMock())
+    monkeypatch.setattr("strategy.cycle.tg.on_crash", crash)
+    monkeypatch.setattr("strategy.execution.asyncio.sleep", AsyncMock())
+    strategy = budget_runner(accounts, monkeypatch, 1)
+    strategy._wait = AsyncMock()  # the 3m failure backoff; its length is not what this pins
+
+    await strategy.run()
+
+    assert outcomes == ["order 1 rejected", True]
+    assert budget_lines(info) == [  # the failed cycle is counted nowhere, so it says nothing here
+        "Cycle budget: 1/1 traded",
+        "No cycle budget left (1/1 traded), stopping",
+    ]
+    assert crash.await_count == 0  # a budget exit is not a crash, and neither is a retried cycle
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_without_the_flag_the_run_never_ends_on_its_own(monkeypatch):
+    # The default has to stay today's unbounded run: no budget object, no counting, no extra line,
+    # and the only way out is still the stop that closes everything.
+    accounts, _, net = basket("1.00")
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    strategy = strategy_for(accounts, None, monkeypatch)
+    strategy.stop_event = asyncio.Event()
+
+    task = asyncio.create_task(strategy.run())
+    while len(outcomes) < 2:
+        await asyncio.sleep(0.05)
+
+    assert not task.done()  # two traded cycles and still running, as it would forever
+    strategy.stop_event.set()
+    await task
+
+    lines = [call.args[0] for call in info.call_args_list]
+    assert outcomes == [True, True]
+    assert not budget_lines(info)
+    assert lines[-1] == "Shutdown cleanup complete"
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_a_group_starting_on_a_spent_budget_trades_nothing(monkeypatch):
+    # Groups start staggered, and a regroup builds new ones, so a group can reach its first cycle
+    # after another group traded the last one. It has to stop before trading, not after.
+    accounts, _, net = basket("1.00")
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    strategy = budget_runner(accounts, monkeypatch, 1)
+    strategy.budget.record(traded=True)  # another group traded the only cycle of this run
+
+    await strategy.run()
+
+    lines = [call.args[0] for call in info.call_args_list]
+    assert not outcomes  # the group never entered a cycle
+    assert all(not acc.orders for acc in accounts)
+    assert budget_lines(info)[-1] == "No cycle budget left (1/1 traded), stopping"
+    assert lines[-1] == "Shutdown cleanup complete"
+
+
+async def test_a_stop_ends_a_limited_run_waiting_out_its_cooldown(monkeypatch):
+    # The cooldown of a `--cycles` run now watches the budget as well, and the stop is still the
+    # other latch: a Ctrl-C mid-cooldown closes everything instead of waiting for the next cycle.
+    accounts, _, net = basket("1.00")
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    strategy = budget_runner(accounts, monkeypatch, 3, trade_cooldown=[60, 60])
+    strategy.stop_event = asyncio.Event()
+
+    task = asyncio.create_task(strategy.run())
+    while not outcomes:  # the first cycle, with two still left in the budget
+        await asyncio.sleep(0.05)
+
+    strategy.stop_event.set()
+    # Not wait_for: that cancels the run itself, which is exactly the signal under test here.
+    done, pending = await asyncio.wait([task], timeout=5)
+    for leftover in pending:  # a cooldown deaf to the stop must not keep running
+        leftover.cancel()
+
+    assert done, "the stop did not end the cooldown"
+    lines = [call.args[0] for call in info.call_args_list]
+    assert outcomes == [True]  # no second cycle, and no minute spent waiting for one
+    assert lines[-2].startswith("Stop requested")
+    assert lines[-1] == "Shutdown cleanup complete"
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+async def test_a_stop_in_the_failure_backoff_still_leaves_as_before(monkeypatch):
+    # The budget latch shares that backoff with the stop, and each keeps its own exit: a spent
+    # budget breaks to the budget's cleanup, while a stop propagates as it always has.
+    accounts, _, net = basket("1.00")
+    accounts[1].fail = lambda n: n == 1  # the cycle fails, its cleanup still works
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    monkeypatch.setattr("strategy.cycle.logger.warning", Mock())
+    monkeypatch.setattr("strategy.cycle.tg.on_error", AsyncMock())
+    strategy = budget_runner(accounts, monkeypatch, 2)
+    strategy.stop_event = asyncio.Event()
+
+    task = asyncio.create_task(strategy.run())
+    while not outcomes:  # the failed cycle, now waiting out its 3m backoff
+        await asyncio.sleep(0.05)
+
+    strategy.stop_event.set()
+    done, pending = await asyncio.wait([task], timeout=5)  # never cancels the task itself
+    for leftover in pending:  # a backoff deaf to the stop must not keep running
+        leftover.cancel()
+
+    assert done and task.cancelled()  # the stop still ends the run by propagating
+    assert not budget_lines(info)  # and not as a budget that ran out, because it has not
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+def grouped_run(monkeypatch) -> list[SimClient]:
+    """Four simulator accounts for two groups of two, with the group stagger out of the way."""
+    net: dict[str, Decimal] = {}
+    accounts = [SimClient(f"acc{i}", net) for i in range(4)]
+    # Only the group stagger: patching random.uniform itself would zero the trade size too.
+    monkeypatch.setattr("strategy.runner.random", SimpleNamespace(uniform=lambda *_: 0))
+    monkeypatch.setattr("strategy.cycle.random.sample", lambda values, count: list(values))
+    monkeypatch.setattr("strategy.cycle.tg.on_trade_start", AsyncMock(return_value=1))
+    monkeypatch.setattr("strategy.cycle.tg.on_trade_stop", AsyncMock())
+    return accounts
+
+
+async def test_several_groups_stop_promptly_when_the_limit_is_reached(monkeypatch):
+    # Two groups share one counter, so the first one to finish is waiting out a cooldown it no
+    # longer needs when the other trades the last cycle. It has to leave right then: the cooldown
+    # here is far longer than the whole run, so sitting it out would hang this test.
+    accounts = grouped_run(monkeypatch)
+    order = accounts[2].market_order
+
+    async def slow_order(*args, **kwargs):  # group 2 lands its cycle after group 1 is waiting
+        await asyncio.sleep(0.3)
+        return await order(*args, **kwargs)
+
+    accounts[2].market_order = slow_order
+    outcomes = count_cycles(monkeypatch)
+    info = Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    budget = CycleBudget(2)
+    cfg = make_cfg(group_size=2, trade_cooldown=[60, 60])
+
+    await asyncio.wait_for(_run_groups(cfg, cast(list[TradingClient], accounts), budget), 20)
+
+    lines = [call.args[0] for call in info.call_args_list]
+    assert outcomes == [True, True]  # N cycles of this run between them, not N per group
+    assert budget.done == 2
+    # Both groups left over the budget, the group that was waiting included: nobody was stopped.
+    assert budget_lines(info).count("No cycle budget left (2/2 traded), stopping") == 2
+    assert not any(line.startswith("Stop requested") for line in lines)
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+async def test_a_group_in_its_failure_backoff_leaves_when_the_limit_is_reached(monkeypatch):
+    # Group 2's cycle fails and it goes into the 3m retry backoff; group 1 then trades the last
+    # cycle. The backoff keeps its length, so the only way this run ends in seconds is that a
+    # spent budget ends the waiting the way it ends a cooldown.
+    accounts = grouped_run(monkeypatch)
+    accounts[2].fail = lambda n: n == 1  # the cycle fails, its cleanup still works
+    outcomes = count_cycles(monkeypatch)
+    info, warning = Mock(), Mock()
+    monkeypatch.setattr("strategy.cycle.logger.info", info)
+    monkeypatch.setattr("strategy.cycle.logger.warning", warning)
+    monkeypatch.setattr("strategy.cycle.tg.on_error", AsyncMock())
+    crash = AsyncMock()
+    monkeypatch.setattr("strategy.cycle.tg.on_crash", crash)
+    budget = CycleBudget(2)
+
+    await asyncio.wait_for(
+        _run_groups(make_cfg(group_size=2), cast(list[TradingClient], accounts), budget), 20
+    )
+
+    warnings = [call.args[0] for call in warning.call_args_list]
+    assert outcomes.count(True) == 2 and len(outcomes) == 3  # no cycle traded past the limit
+    assert "order 1 rejected" in outcomes  # group 2 failed its cycle and waited to retry
+    assert any("retrying in 3m" in line for line in warnings)  # the backoff was not shortened
+    assert budget_lines(info).count("No cycle budget left (2/2 traded), stopping") == 2
+    assert crash.await_count == 0  # leaving a backoff on a spent budget is not a crash
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+async def test_a_single_group_trades_exactly_the_limit(monkeypatch):
+    # One group is the normal case, and there the number the operator typed is exact: no cycle is
+    # lost and none is started past the limit, whatever the multi-group slack allows.
+    accounts = grouped_run(monkeypatch)[:2]
+    outcomes = count_cycles(monkeypatch)
+    budget = CycleBudget(3)
+
+    await asyncio.wait_for(_run_groups(make_cfg(), cast(list[TradingClient], accounts), budget), 30)
+
+    assert outcomes == [True, True, True]
+    assert budget.done == 3
+    assert all(not any(acc.pos.values()) for acc in accounts)
+
+
+async def test_a_spent_budget_ends_the_run_instead_of_regrouping(monkeypatch):
+    # Regrouping re-creates the groups forever by design, so the budget has to end that loop too,
+    # and without waiting out a regroup interval the operator never asked to sit through.
+    accounts = grouped_run(monkeypatch)
+    outcomes = count_cycles(monkeypatch)
+    # A cooldown outlasting the run keeps this about the regroup loop, not about which group
+    # finishes its cycle first.
+    cfg = make_cfg(group_size=2, regroup_interval=30, trade_cooldown=[60, 60])
+
+    await asyncio.wait_for(
+        _run_groups(cfg, cast(list[TradingClient], accounts), CycleBudget(2)), 20
+    )
+
+    assert outcomes == [True, True]  # one round of groups, not a second set after the regroup
+    assert all(not acc.pos.get("BTC") for acc in accounts)
+
+
+async def test_groups_that_exit_early_wait_out_the_regroup_interval(monkeypatch):
+    # Every group can leave before the budget is spent (max_failures, a failed balance read).
+    # The run must still wait the regroup interval, not restart the groups at once in a loop.
+    accounts = grouped_run(monkeypatch)
+    budget = CycleBudget(2)
+    started: list[str] = []
+    waits: list[float] = []
+
+    async def run_group(cfg, name, accs, stop_event, stagger, budget) -> None:
+        started.append(name)
+        if len(started) >= 6:  # a regroup loop that never waits ends here instead of hanging
+            budget.record(traded=True)
+            budget.record(traded=True)
+
+    async def regroup_wait(sec: float, *events) -> None:
+        waits.append(sec)
+        budget.record(traded=True)
+        budget.record(traded=True)  # spent while waiting: the wait ends early, as it does live
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("strategy.runner._run_group", run_group)
+    monkeypatch.setattr("strategy.runner.utils.interruptible_sleep", regroup_wait)
+    cfg = make_cfg(group_size=2, regroup_interval=30)
+
+    await asyncio.wait_for(_run_groups(cfg, cast(list[TradingClient], accounts), budget), 20)
+
+    assert started == ["01", "02"]  # one round of groups, no restart before the interval
+    assert waits == [30]
 
 
 def omni_with(asset: OmniSupportedAsset) -> OmniClient:
