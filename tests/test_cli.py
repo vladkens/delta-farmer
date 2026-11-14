@@ -167,6 +167,38 @@ async def test_trade_accepts_optional_pool(monkeypatch, argv, pool):
     assert args.pool == pool
 
 
+@pytest.mark.parametrize(
+    ("argv", "cycles"),
+    [
+        (["exchange", "trade"], None),  # absent means the unbounded run, as before
+        (["exchange", "trade", "--cycles", "3"], 3),
+        (["exchange", "trade", "stock", "--cycles", "1"], 1),
+    ],
+)
+async def test_trade_accepts_a_cycle_limit(monkeypatch, argv, cycles):
+    monkeypatch.setattr("lib.cli.sys.argv", argv)
+    monkeypatch.setattr("lib.cli._load_tg_config", Mock(return_value=Mock()))
+    monkeypatch.setattr("lib.cli.tg.init", Mock())
+    monkeypatch.setattr("lib.cli.telemetry.init", Mock())
+    monkeypatch.delenv("DF_LOG_FILE", raising=False)
+
+    args = await create_cli("exchange", "config.toml", ["privkey"])
+
+    assert args.cycles == cycles
+
+
+@pytest.mark.parametrize(("value", "message"), [("0", "must be 1 or more"), ("x", "not a number")])
+async def test_trade_refuses_a_cycle_limit_that_cannot_run(monkeypatch, capsys, value, message):
+    monkeypatch.setattr("lib.cli.sys.argv", ["exchange", "trade", "--cycles", value])
+    monkeypatch.setattr("lib.cli.telemetry.init", Mock())
+
+    with pytest.raises(SystemExit) as exc:
+        await create_cli("exchange", "config.toml", ["privkey"])
+
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 async def test_license_prompts_when_missing_then_shows_status(monkeypatch):
     license = {
         "plan": "small",

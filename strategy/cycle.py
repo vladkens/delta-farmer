@@ -111,6 +111,44 @@ class RepeatErrorGuard:
                 logger.warning(f"{self.prefix} {error_key[:200]}, continuing wait...")
 
 
+class CycleBudget:
+    """The traded cycles of this run counted against the limit it stops at.
+
+    `limit` is `None` for the unbounded run, which is the default.
+
+    One counter belongs to the whole process, so `--cycles N` is N cycles of this run and not N
+    per group: every group shares this object. Only a cycle that traded counts, and a group reads
+    the count before it starts the next cycle, so nothing is reserved and no group ever waits for
+    another group's cycle. The run therefore stops after at least `limit` traded cycles: a single
+    group trades exactly `limit`, and every extra group can add the one cycle it already had in
+    flight when the limit was reached.
+    """
+
+    def __init__(self, limit: int | None = None):
+        self.limit = limit
+        self.done = 0  # cycles that opened and closed a trade, across every group
+        # Set once and never cleared, so no group can miss it: a group waiting out its cooldown
+        # when another group trades the last cycle leaves at once. `None` while unbounded, which
+        # keeps the default run's cooldown on the exact path it has today.
+        self.spent_event = asyncio.Event() if limit is not None else None
+
+    def is_spent(self) -> bool:
+        """True once `limit` cycles have traded; always False for the unbounded run."""
+        return self.limit is not None and self.done >= self.limit
+
+    def record(self, *, traded: bool) -> None:
+        """Count a finished cycle: only one that opened and closed a trade spends the budget."""
+        if self.limit is None:
+            return
+
+        self.done += 1 if traded else 0
+        progress = f"Cycle budget: {self.done}/{self.limit} traded"
+        logger.info(progress if traded else f"{progress}, this one did not count")
+
+        if self.is_spent() and self.spent_event is not None:
+            self.spent_event.set()
+
+
 class DeltaStrategy:
     """
     Delta-neutral strategy that works with any TradingClient.
@@ -122,18 +160,28 @@ class DeltaStrategy:
         cfg: TradeConfig,
         accounts: Sequence[TradingClient],
         stop_event: asyncio.Event | None = None,
+        budget: CycleBudget | None = None,
     ):
         self.cfg = cfg
         self.accounts = list(accounts)
         self.stop_event = stop_event
+        self.budget = budget if budget is not None else CycleBudget()
         self.initial_bal: float = 0.0
         self.last_total_pnl: float = 0.0
 
     # MARK: Core trading flow
 
-    async def _wait(self, wait_sec: float):
+    async def _wait(self, wait_sec: float, *stops: asyncio.Event | None):
         logger.info(utils.wait_msg(wait_sec))
-        await utils.interruptible_sleep(wait_sec, self.stop_event)
+        await utils.interruptible_sleep(wait_sec, self.stop_event, *stops)
+
+    async def _shutdown(self) -> None:
+        """Leave nothing open anywhere: the one exit path a stop and a spent budget share."""
+        if not await close_all(self.accounts):
+            logger.error("Shutdown cleanup incomplete; close positions manually")
+            return
+
+        logger.info("Shutdown cleanup complete")
 
     async def run(self):
         bals = await self.get_balances(self.accounts)
@@ -141,26 +189,30 @@ class DeltaStrategy:
         clean = False  # close leftovers of a previous run before the first cycle
 
         failures = 0
-        while True:
+        while not self.budget.is_spent():  # unbounded without --cycles: nothing is ever spent
             try:
                 print("-" * 60) if not self.cfg.group_size else None
                 # Never trade on top of positions a failed cleanup left open.
                 if not clean and not (clean := await close_all(self.accounts)):
                     raise AppError("Cleanup incomplete; positions remain open")
 
-                await self.trade_cycle()
+                traded = await self.trade_cycle()
                 failures = 0
-                await self._wait(self.cfg.trade_cooldown.sample())
-            except asyncio.CancelledError:  # stop_event triggered, time to exit
+                self.budget.record(traded=traded)
+                if self.budget.is_spent():
+                    break  # the cooldown would only delay the exit
+
+                # Another group can trade the last cycle while this group waits here, so the
+                # cooldown ends on a spent budget exactly as it ends on a stop.
+                await self._wait(self.cfg.trade_cooldown.sample(), self.budget.spent_event)
+            except asyncio.CancelledError:  # a stop, or a budget spent during the cooldown
+                if self.budget.is_spent():
+                    break  # another group traded the last cycle; leave by the same exit it took
+
                 logger.info(
                     "Stop requested, closing all positions; press Ctrl-C again only to force exit"
                 )
-                if not await close_all(self.accounts):
-                    logger.error("Shutdown cleanup incomplete; close positions manually")
-                    return
-
-                logger.info("Shutdown cleanup complete")
-                return
+                return await self._shutdown()
             except Exception as e:
                 clean = await close_all(self.accounts)
 
@@ -179,10 +231,25 @@ class DeltaStrategy:
                 msg = f"Cycle failed ({failures}) {error}, retrying in {wait_str}"
                 logger.warning(msg)
                 await tg.on_error(error, failures, wait_sec)
-                await self._wait(wait_sec)
+                try:
+                    # The backoff keeps its length and its progression; a spent budget only ends
+                    # the waiting, as it ends the cooldown.
+                    await self._wait(wait_sec, self.budget.spent_event)
+                except asyncio.CancelledError:
+                    if not self.budget.is_spent():
+                        raise  # a stop mid-backoff leaves exactly as it does today
 
-    async def trade_cycle(self):
-        """Run one full trade cycle across the selected symbols."""
+                    break  # another group traded the last cycle; leave by the budget's own exit
+
+        # Only a spent budget leaves the loop, either by the check above or by one of its breaks;
+        # every other group of this run is leaving too, each after the cycle it had in flight.
+        logger.info(
+            f"No cycle budget left ({self.budget.done}/{self.budget.limit} traded), stopping"
+        )
+        await self._shutdown()
+
+    async def trade_cycle(self) -> bool:
+        """Run one full trade cycle across the selected symbols; True if it opened and closed one."""
 
         # 1. Get balances
         accounts = self.get_ordered_accounts()
@@ -197,7 +264,7 @@ class DeltaStrategy:
                 f"Only {len(tradeable)}/{self.cfg.symbols_per_trade} symbols are tradeable "
                 "for the planned window; skipping cycle"
             )
-            return
+            return False
 
         symbols = random.sample(tradeable, self.cfg.symbols_per_trade)
         exp_usd = self.get_trade_size(was_bals)
@@ -206,7 +273,7 @@ class DeltaStrategy:
         )
         if trades is None:
             logger.error("No valid account combination found for trading.")
-            return
+            return False
 
         # 3. Validate the whole plan, parts included, before changing anything on accounts
         for trade in trades:
@@ -230,7 +297,7 @@ class DeltaStrategy:
             gate_ok = await asyncio.gather(*[part.gate(self.cfg) for part in round_parts])
             if not all(gate_ok):
                 if i == 0:
-                    return
+                    return False  # nothing opened, nothing to close
 
                 logger.warning(f"Entry gate failed at part {i + 1}/{n_parts}; keeping {i} parts")
                 break
@@ -274,6 +341,8 @@ class DeltaStrategy:
         pnl, self.last_total_pnl = now_bals.log_pnl(was_bals, self.initial_bal, self.last_total_pnl)
         dur = time.time() - stime
         await tg.on_trade_stop(pnl, dur, float(act_usd), now_bals.items(), msgid)
+
+        return True
 
     # MARK: Helpers
 

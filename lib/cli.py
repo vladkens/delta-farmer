@@ -132,6 +132,18 @@ def cli_anyarg(
     _apply(parser, is_root=True)
 
 
+def _positive_int(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a number") from None
+
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+
+    return count
+
+
 def _git(repo: str, *args: str) -> str | None:
     try:
         out = subprocess.check_output(
@@ -314,6 +326,13 @@ async def create_cli(
     sub = cli.add_subparsers(dest="command")
     trade_parser = sub.add_parser("trade", help="Run trading manager")
     trade_parser.add_argument("pool", nargs="?", metavar="POOL", help="Named account pool")
+    trade_parser.add_argument(
+        "--cycles",
+        metavar="N",
+        type=_positive_int,
+        help="Stop after N cycles that traded, closing everything; skips and failures don't count, "
+        "and each group beyond the first can add the cycle it already had in flight",
+    )
     sub.add_parser("close", help="Close all positions")
     sub.add_parser("positions", help="Show active positions")
     sub.add_parser("info", help="Show accounts info")

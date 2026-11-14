@@ -201,7 +201,7 @@ async def main():
             case "trade":
                 strategy, accounts = select_strategy(cfg, act_accs, cli.pool)
                 await require_login(accounts)
-                await run_groups(strategy, accounts)
+                await run_groups(strategy, accounts, cycles=cli.cycles)
             case "positions":
                 await print_positions(act_accs)
             case "deposit":

@@ -16,7 +16,7 @@ from lib import telemetry, utils
 from lib.errors import AppError
 from lib.logger import logger
 
-from .cycle import DeltaStrategy
+from .cycle import CycleBudget, DeltaStrategy
 from .models import AppConfig, Position, TradeConfig, TradingClient
 from .symbols import ensure_exchange_symbols
 
@@ -185,8 +185,9 @@ async def _run_group(
     accs: Sequence[TradingClient],
     stop_event: asyncio.Event,
     stagger: float = 0,
+    budget: CycleBudget | None = None,
 ) -> None:
-    strategy = DeltaStrategy(cfg, accs, stop_event=stop_event)
+    strategy = DeltaStrategy(cfg, accs, stop_event=stop_event, budget=budget)
     with logger.contextualize(group=name):
         await asyncio.sleep(stagger) if stagger else None
         logger.info(f"Starting group with accounts: {', '.join(a.name for a in accs)}")
@@ -262,11 +263,14 @@ def _track_trade_started(cfg: TradeConfig, accs: Sequence[TradingClient]) -> Non
     telemetry.track("trade_started", props)
 
 
-async def _run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+async def _run_groups(
+    cfg: TradeConfig, accs: Sequence[TradingClient], budget: CycleBudget | None = None
+) -> None:
+    budget = budget if budget is not None else CycleBudget()
     if not cfg.group_size:  # Single group mode, no regrouping
-        return await DeltaStrategy(cfg, accs).run()
+        return await DeltaStrategy(cfg, accs, budget=budget).run()
 
-    while True:
+    while not budget.is_spent():  # the groups share one budget, so a spent one ends the whole run
         tasks: list[asyncio.Task] = []
         stop_event = asyncio.Event()
         try:
@@ -279,14 +283,19 @@ async def _run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
             for i, grp_accounts in enumerate(grps):
                 stagger = i * random.uniform(10, 30)
                 name = f"{i + 1:02d}"
-                coro = _run_group(cfg, name, grp_accounts, stop_event, stagger)
+                coro = _run_group(cfg, name, grp_accounts, stop_event, stagger, budget)
                 tasks.append(asyncio.create_task(coro, name=f"delta-{name}"))
 
             if cfg.regroup_interval is None:  # run until manually stopped
                 await asyncio.gather(*tasks, return_exceptions=True)
                 return
 
-            await asyncio.sleep(cfg.regroup_interval)
+            try:  # a spent budget ends the run, which can come before the next regroup
+                await utils.interruptible_sleep(cfg.regroup_interval, budget.spent_event)
+            except asyncio.CancelledError:
+                if not budget.is_spent():
+                    raise
+
             stop_event.set()
 
             limit_wait = cfg.limit_wait_budget if cfg.use_limit else 0
@@ -301,12 +310,14 @@ async def _run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def run_groups(cfg: TradeConfig, accs: Sequence[TradingClient]) -> None:
+async def run_groups(
+    cfg: TradeConfig, accs: Sequence[TradingClient], *, cycles: int | None = None
+) -> None:
     """Run one strategy, preserving the legacy runner API."""
     await _prepare_groups(cfg, accs)
     tg.start()
     _track_trade_started(cfg, accs)
-    await _run_groups(cfg, accs)
+    await _run_groups(cfg, accs, CycleBudget(cycles))
 
 
 def select_strategy[T: TradingClient](
@@ -333,8 +344,12 @@ def select_strategy[T: TradingClient](
 
 
 async def run_strategy(
-    cfg: AppConfig, accs: Sequence[TradingClient], pool_name: str | None
+    cfg: AppConfig,
+    accs: Sequence[TradingClient],
+    pool_name: str | None,
+    *,
+    cycles: int | None = None,
 ) -> None:
     """Resolve and run one legacy strategy or named pool."""
     strategy, strategy_accs = select_strategy(cfg, accs, pool_name)
-    await run_groups(strategy, strategy_accs)
+    await run_groups(strategy, strategy_accs, cycles=cycles)

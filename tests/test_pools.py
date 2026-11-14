@@ -172,6 +172,23 @@ async def test_run_strategy_delegates_only_selected_pool(monkeypatch):
     assert [account.name for account in accounts] == ["one", "two"]
 
 
+@pytest.mark.parametrize("cycles", [None, 4], ids=["unbounded", "four-cycles"])
+async def test_the_cycle_limit_reaches_the_run_loop(monkeypatch, cycles):
+    # The CLI value has to arrive as the run's budget; `None` must stay the unbounded run.
+    run = AsyncMock()
+    monkeypatch.setattr("strategy.runner._prepare_groups", AsyncMock())
+    monkeypatch.setattr("strategy.runner.tg.start", Mock())
+    monkeypatch.setattr("strategy.runner._track_trade_started", Mock())
+    monkeypatch.setattr("strategy.runner._run_groups", run)
+
+    await run_strategy(
+        pooled_config(), cast(list[TradingClient], pool_clients()), "btc", cycles=cycles
+    )
+
+    budget = run.await_args.args[2]
+    assert budget.limit == cycles
+
+
 async def test_group_tasks_are_awaited_when_pool_is_cancelled(monkeypatch):
     cfg = pooled_config().pools["eth"]
     clients = cast(list[TradingClient], pool_clients()[2:])

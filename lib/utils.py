@@ -412,17 +412,26 @@ async def gather_cancel(tasks: list[asyncio.Task], timeout: float) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def interruptible_sleep(sec: float, stop_event: asyncio.Event | None = None) -> None:
-    """Sleep for sec seconds, raising CancelledError early if stop_event fires."""
-    if stop_event is None:
+async def interruptible_sleep(sec: float, *stop_events: asyncio.Event | None) -> None:
+    """Sleep for sec seconds, raising CancelledError early if any of stop_events fires.
+
+    Several events are one mechanism, not a race: each is a latch a caller sets once to say the
+    wait is pointless now, and `None` is a signal this caller does not have.
+    """
+    events = [event for event in stop_events if event is not None]
+    if not events:
         await asyncio.sleep(sec)
         return
 
-    if stop_event.is_set():
+    if any(event.is_set() for event in events):
         raise asyncio.CancelledError
 
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
     try:
-        await asyncio.wait_for(stop_event.wait(), timeout=sec)
+        fired, _ = await asyncio.wait(waits, timeout=sec, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for wait in waits:
+            wait.cancel()
+
+    if fired:
         raise asyncio.CancelledError
-    except TimeoutError:
-        pass  # completed normally
