@@ -8,7 +8,7 @@
 
 <div align="center">
 
-[![Follow @uid127 on X](https://badges.ws/badge/-/Follow%20%40uid127/000?icon=x&label)](https://x.com/uid127) [![Project updates on Telegram](https://badges.ws/badge/-/Project%20Updates/2CA5E0?icon=telegram&label)](https://t.me/eazyrekt) [![Community chat on Telegram](https://badges.ws/badge/-/Community%20Chat/2CA5E0?icon=telegram&label)](https://t.me/+JPqp0bteCWwzMDJk) [![Support or subscribe](https://badges.ws/badge/-/Support%20%26%20Subscribe/FF6B35?icon=telegram&label)](https://t.me/deltafarm_bot)
+[![Follow @uid127 on X](https://badges.ws/badge/-/Follow%20%40uid127/000?icon=x&label)](https://x.com/uid127) [![Project updates on Telegram](https://badges.ws/badge/-/Project%20Updates/2CA5E0?icon=telegram&label)](https://t.me/eazyrekt) [![Community chat on Telegram](https://badges.ws/badge/-/Community%20Chat/2CA5E0?icon=telegram&label)](https://t.me/+JPqp0bteCWwzMDJk)
 
 </div>
 
@@ -166,7 +166,6 @@ uv run apps/omni.py close
 | `config new`                                 | All active launchers                 | Create a config from `config.example.toml`.                                      |
 | `config encrypt`                             | All active launchers                 | Encrypt private keys and other supported secrets in place.                       |
 | `config decrypt`                             | All active launchers                 | Restore plaintext secrets for inspection or migration.                           |
-| `license`                                    | All active launchers                 | Show Supporter status and offer activation when no key is configured.            |
 
 Lighter currently uses its account summary for `stats`; the other active launchers provide period reports. Run `uv run apps/<app>.py --help` or append `--help` to a public subcommand for its exact options. Use `-c` before or after a subcommand to select another config file.
 
@@ -525,30 +524,22 @@ uv sync --locked
 
 Read [changelog.md](changelog.md), then rerun `info` and `positions` before restarting unattended instances.
 
-## Privacy and Supporter subscription
+## Privacy
 
 Delta-farmer sends anonymous operational telemetry containing a hashed machine identifier, launcher and command names, platform and version information, and coarse feature flags. It does not include private keys, wallet addresses, balances, symbol names, or trade sizes. Set `DF_TELEMETRY=0` to disable it.
 
-You can [buy a Supporter subscription or make a donation through @deltafarm_bot](https://t.me/deltafarm_bot). The subscription helps fund maintenance, while every MIT-licensed feature remains usable without payment. The app keeps hashed wallet identities locally for a rolling 30-day account count and shows a short reminder when no suitable Supporter key is active.
-
-```bash
-uv run apps/omni.py license
-```
-
-The command shows the current status and offers key activation when none is configured. Supporter checks fail open: a service outage never blocks trading, position closure, deposits, withdrawals, or other existing commands. An active subscription that covers the local account count can set `DF_NO_BANNER=1` to hide the startup banner.
-
 ## Environment variables
 
-| Variable                  | Purpose                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------- |
-| `DF_CONFIG_PASSWORD`      | Supply the config encryption password for unattended runs.                            |
-| `DF_LOG_FILE=1`           | Write trading logs to a timestamped file under `logs/`.                               |
-| `DF_NO_UPDATE_NOTIFIER=1` | Disable release update checks.                                                        |
-| `DF_TELEMETRY=0`          | Disable anonymous operational telemetry.                                              |
-| `DF_ACCOUNTS_CONCURRENCY` | Limit concurrent account requests; defaults to `3`.                                   |
-| `DF_NO_BANNER=1`          | Hide the banner when an active Supporter subscription covers the local account count. |
-| `CAPTCHA_KEY`             | Use a personal Astrum solver key for Omni.                                            |
-| `LOGURU_LEVEL`            | Set the log level, for example `INFO` or `DEBUG`.                                     |
+| Variable                  | Purpose                                                    |
+| ------------------------- | ---------------------------------------------------------- |
+| `DF_CONFIG_PASSWORD`      | Supply the config encryption password for unattended runs. |
+| `DF_LOG_FILE=1`           | Write trading logs to a timestamped file under `logs/`.    |
+| `DF_NO_UPDATE_NOTIFIER=1` | Disable release update checks.                             |
+| `DF_TELEMETRY=0`          | Disable anonymous operational telemetry.                   |
+| `DF_ACCOUNTS_CONCURRENCY` | Limit concurrent account requests; defaults to `3`.        |
+| `DF_NO_BANNER=1`          | Hide the startup banner.                                   |
+| `CAPTCHA_KEY`             | Use a personal Astrum solver key for Omni.                 |
+| `LOGURU_LEVEL`            | Set the log level, for example `INFO` or `DEBUG`.          |
 
 ## Risk disclosure
 
@@ -559,7 +550,6 @@ Delta-farmer is provided as-is, without a guarantee of profit, points, airdrop e
 - Follow [@uid127 on X](https://x.com/uid127) for project updates.
 - Read the [Telegram channel](https://t.me/eazyrekt) for release notes and farming updates.
 - Ask questions in the [Telegram chat](https://t.me/+JPqp0bteCWwzMDJk).
-- [Support development or buy a Supporter subscription](https://t.me/deltafarm_bot).
 - Report reproducible defects through [GitHub Issues](https://github.com/vladkens/delta-farmer/issues).
 
 Delta-farmer is released under the [MIT License](LICENSE).
